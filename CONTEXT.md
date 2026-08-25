@@ -188,10 +188,17 @@ never sees the `dblclick` at all. `startDrag`/`startResize` capture on
 
 **4. The `hidden` attribute loses to a `display` rule.** Any element you toggle
 with `.hidden = true` needs an explicit `[hidden] { display: none }` if its CSS
-sets `display`. `#help`, `#focusBar` and `.pane` all have one. *(Real bug: an
-invisible help overlay was eating every click on the canvas.)*
+sets `display`. `.pane` has one. *(Real bug: an invisible help overlay was
+eating every click on the canvas — which is also why the shortcut sheet is now
+a view of the rail, `#rail.help`, rather than anything that floats.)*
 
-**5. `app.js` never calls `fetch`, constructs an `<iframe>`, or touches
+**5. Anything drawn inside `#world` scales with the camera — including SVG
+stroke widths.** `vector-effect: non-scaling-stroke` does *not* rescue you:
+it ignores transforms inside the SVG, and ours is the CSS `scale()` on `#world`,
+outside it. Edge widths are `calc(N / var(--ez))` with `--ez` written by
+`applyCamera`, and arrowheads get a matching `scale(1/z)` from `sizeHeads`.
+
+**6. `app.js` never calls `fetch`, constructs an `<iframe>`, or touches
 `localStorage`.** All of it goes through `Shell`. This is what keeps the desktop
 port to one file.
 

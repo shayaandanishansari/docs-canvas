@@ -32,8 +32,9 @@ No dependencies, no install — it's plain Node.
   window doesn't get swallowed by the page inside it. Once woken it behaves like
   a normal page. Clicking empty canvas re-shields everything.
 - **Double-click a title bar for webpage mode** — the window fills the screen and
-  the doc genuinely reflows at full width (it's a resize, not a zoom). Esc puts
-  it back exactly where it was, scroll position intact.
+  the doc genuinely reflows at full width (it's a resize, not a zoom). Esc — or
+  the same button in the title bar, now showing arrows pointing in — puts it
+  back exactly where it was, scroll position intact.
 - **Arrows and sticky notes** for the story around the docs.
 
 Shortcuts are on the `?` button.

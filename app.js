@@ -75,6 +75,10 @@
     var c = state.camera;
     world.style.transform = 'translate(' + c.x + 'px,' + c.y + 'px) scale(' + c.z + ')';
     $('#zoomVal').textContent = Math.round(c.z * 100) + '%';
+    if (edgesEl) {
+      edgesEl.style.setProperty('--ez', c.z);   // stroke widths divide by this
+      sizeHeads();
+    }
   }
 
   function screenToWorld(sx, sy) {
@@ -179,8 +183,12 @@
       actions.appendChild(b);
       return b;
     }
+    var focusBtn = null;
     if (n.type !== 'note') {
-      act('⛶', 'Webpage mode (double-click the bar)', function () { enterFocus(n); });
+      focusBtn = act('', '', function () {
+        focus && focus.id === n.id ? exitFocus() : enterFocus(n);
+      });
+      setFocusIcon(focusBtn, false);
       act('↗', 'Open in a real browser tab', function () {
         if (n.type === 'web') { if (n.url) Shell.openExternal(n.url); }
         else {
@@ -234,10 +242,22 @@
       });
     }
 
-    var rec = { root: root, tabsEl: tabsEl, bodyEl: body, shield: shield, panes: new Map() };
+    var rec = { root: root, tabsEl: tabsEl, bodyEl: body, shield: shield, focusBtn: focusBtn, panes: new Map() };
     els.set(n.id, rec);
     nodesEl.appendChild(root); // append only — never reorder
     return rec;
+  }
+
+  /* One button, two jobs: it opens webpage mode and it is also the way out of
+     it. In focus mode the node fills the screen, so this sits top-right — no
+     separate exit bar floating over the document. */
+  var ICON_EXPAND   = '<svg viewBox="0 0 16 16"><path d="M2.5 6V2.5H6M13.5 6V2.5H10M2.5 10v3.5H6M13.5 10v3.5H10"/></svg>';
+  var ICON_COLLAPSE = '<svg viewBox="0 0 16 16"><path d="M6 2.5V6H2.5M10 2.5V6h3.5M6 13.5V10H2.5M10 13.5V10h3.5"/></svg>';
+
+  function setFocusIcon(b, on) {
+    b.innerHTML = on ? ICON_COLLAPSE : ICON_EXPAND;
+    b.title = on ? 'Leave webpage mode (Esc)' : 'Webpage mode (double-click the bar)';
+    b.classList.toggle('on', on);
   }
 
   function activeTab(n) {
@@ -367,6 +387,7 @@
     r.classList.toggle('live', liveId === n.id);
     r.classList.toggle('focused', !!focus && focus.id === n.id);
     r.classList.toggle('linksrc', !!linking && linking.from === n.id);
+    if (rec.focusBtn) setFocusIcon(rec.focusBtn, !!focus && focus.id === n.id);
     if (n.type !== 'note') rec.shield.hidden = (liveId === n.id);
     syncTabs(n, rec);
     ensurePane(n, rec);
@@ -423,19 +444,30 @@
         render();
       });
       g.appendChild(hit);
-      g.appendChild(svg('path', { d: d, 'vector-effect': 'non-scaling-stroke' }));
+      g.appendChild(svg('path', { d: d }));
 
-      // arrowhead, drawn by hand so it doesn't shrink with the camera
-      var ang = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-      var L = 12, S = 0.42;
-      var h = 'M' + p2.x + ',' + p2.y +
-        'L' + (p2.x - L * Math.cos(ang - S)) + ',' + (p2.y - L * Math.sin(ang - S)) +
-        'M' + p2.x + ',' + p2.y +
-        'L' + (p2.x - L * Math.cos(ang + S)) + ',' + (p2.y - L * Math.sin(ang + S));
-      g.appendChild(svg('path', { d: h, 'vector-effect': 'non-scaling-stroke' }));
+      // The head is drawn in its own local space and scaled by 1/z, so it keeps
+      // its screen size at any zoom. (vector-effect is no help anywhere here:
+      // it ignores transforms *inside* the SVG, and ours is the CSS scale on
+      // #world, outside it. Widths are divided by z in applyCamera instead.)
+      var head = svg('g', { class: 'head' });
+      head.dataset.at = 'translate(' + p2.x + ',' + p2.y + ') ' +
+                        'rotate(' + (Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI) + ')';
+      head.appendChild(svg('path', { d: 'M0,0L-17,-9L-12.5,0L-17,9Z' }));
+      g.appendChild(head);
 
       edgesEl.appendChild(g);
     });
+    sizeHeads();
+  }
+
+  /* Cheap enough to run on every wheel tick: a board has a handful of edges. */
+  function sizeHeads() {
+    var k = 1 / state.camera.z;
+    var heads = edgesEl.querySelectorAll('g.head');
+    for (var i = 0; i < heads.length; i++) {
+      heads[i].setAttribute('transform', heads[i].dataset.at + ' scale(' + k + ')');
+    }
   }
 
   // ---------------------------------------------------------------- node ops
@@ -541,9 +573,6 @@
     n.h = window.innerHeight;
     state.camera = { x: 0, y: 0, z: 1 };
     document.body.classList.add('focus-mode');
-    $('#focusBar').hidden = false;
-    var t = n.type === 'web' ? n.url : (activeTab(n) || {}).path;
-    $('#focusTitle').textContent = t || 'Note';
     setLive(n.id);
     applyCamera();
     render();
@@ -556,7 +585,6 @@
     state.camera = focus.cam;
     focus = null;
     document.body.classList.remove('focus-mode');
-    $('#focusBar').hidden = true;
     applyCamera();
     render();
   }
@@ -719,14 +747,34 @@
     });
   }
 
-  function toggleRail() {
-    railHidden = !railHidden;
+  function toggleRail(force) {
+    railHidden = force === undefined ? !railHidden : !force;
     $('#rail').classList.toggle('hidden', railHidden);
   }
+
+  // The shortcut sheet is a second view of the rail rather than a modal, so
+  // reading it never covers the board you are reading it about.
+  function showHelp(on) {
+    var rail = $('#rail');
+    if (on === undefined) on = !rail.classList.contains('help');
+    rail.classList.toggle('help', on);
+    $('#railTitle').textContent = on ? 'Shortcuts' : 'Docs';
+    $('#railCount').hidden = on;
+    if (on) toggleRail(true);
+  }
+
+  function helpOpen() { return $('#rail').classList.contains('help') && !railHidden; }
 
   // ---------------------------------------------------------------- persistence
 
   var saveTimer;
+
+  // 'dirty' | 'ok' | 'idle' — drives the colour of the dot in the top bar.
+  function setSaveState(text, kind) {
+    var e = $('#saveState');
+    e.textContent = text;
+    e.className = text ? (kind || 'dirty') : 'idle';
+  }
 
   function serialize() {
     return {
@@ -739,11 +787,11 @@
   }
 
   function markDirty() {
-    $('#saveState').textContent = 'unsaved';
+    setSaveState('unsaved', 'dirty');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(function () {
       Shell.draftSet(boardName, serialize());
-      $('#saveState').textContent = 'draft ✓';
+      setSaveState('draft ✓', 'dirty');
     }, 700);
   }
 
@@ -752,7 +800,7 @@
     try {
       await Shell.saveBoard(boardName, serialize());
       Shell.draftSet(boardName, serialize());
-      $('#saveState').textContent = 'saved ✓';
+      setSaveState('saved ✓', 'ok');
       toast('Saved to _canvas/boards/' + boardName + '.json');
     } catch (e) {
       toast('Save failed: ' + e.message);
@@ -781,7 +829,7 @@
     if (draft && (!disk || (draft.savedAt || 0) > (disk.savedAt || 0))) pick = draft;
     if (pick) {
       adopt(pick);
-      $('#saveState').textContent = pick === draft && disk ? 'draft ✓' : 'loaded';
+      if (pick === draft && disk) setSaveState('draft ✓', 'dirty'); else setSaveState('loaded', 'ok');
     } else {
       adopt({ nodes: [], edges: [], camera: { x: 0, y: 0, z: 1 } });
       welcome();
@@ -797,7 +845,7 @@
             'Double-click a title bar for full webpage mode.\n\n' +
             'Press ? for everything else.',
     });
-    $('#saveState').textContent = '';
+    setSaveState('');
   }
 
   // ---------------------------------------------------------------- input
@@ -822,7 +870,7 @@
     if (e.key === 'Escape') {
       if (focus) return exitFocus();
       if (linking) return toggleLink();
-      if (!$('#help').hidden) { $('#help').hidden = true; return; }
+      if (helpOpen()) { showHelp(false); return; }
       selected = null; selectedEdge = null; setLive(null); render();
       return;
     }
@@ -838,7 +886,7 @@
       case 'f': case 'F': fitAll(); break;
       case 'l': case 'L': toggleLink(); break;
       case '0': fly(function () { state.camera.z = 1; }); markDirty(); break;
-      case '?': $('#help').hidden = false; break;
+      case '?': showHelp(true); break;
       case 'Delete': case 'Backspace':
         if (selectedEdge) {
           state.edges = state.edges.filter(function (x) { return x.id !== selectedEdge; });
@@ -856,9 +904,7 @@
         case 'save': saveToDisk(); break;
         case 'fit': fitAll(); break;
         case 'link': toggleLink(); break;
-        case 'help': $('#help').hidden = false; break;
-        case 'help-close': $('#help').hidden = true; break;
-        case 'focus-out': exitFocus(); break;
+        case 'help': showHelp(); break;
         case 'zoom-in': zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); break;
         case 'zoom-out': zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); break;
         case 'add-note': {
@@ -878,14 +924,11 @@
       }
     });
 
-    $('#railToggle').addEventListener('click', toggleRail);
+    $('#railToggle').addEventListener('click', function () { toggleRail(); });
     $('#search').addEventListener('input', renderRail);
     $('#boardName').addEventListener('change', function () {
       var v = $('#boardName').value.trim().replace(/[^a-z0-9_-]/gi, '') || 'default';
       loadBoard(v);
-    });
-    $('#help').addEventListener('click', function (e) {
-      if (e.target.id === 'help') $('#help').hidden = true;
     });
   }
 
