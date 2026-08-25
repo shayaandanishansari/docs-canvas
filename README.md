@@ -13,6 +13,10 @@ node _canvas/server.js
 or double-click `start.cmd`. It opens `http://localhost:8765/`. Ctrl+C in the
 terminal stops it.
 
+Running it twice is safe: the second launch notices the first, opens a tab
+pointing at it, and exits. It won't start a rival server on another port — two
+servers sharing one `boards/` folder overwrite each other's saves.
+
 By default it serves the folder this one sits in. To start somewhere else:
 
 ```
@@ -59,9 +63,9 @@ picker, and that folder becomes a branch you can expand.
 - **Paste a screenshot.** `Win+Shift+S`, then `Ctrl+V` on the canvas. Dragging an
   image in from Explorer works too. Screenshots are saved next to the board in
   `_canvas/assets/`, not stuffed into the board file.
-- **Pen** (`P`) draws freehand, in four colours — including straight over a
-  document, which is the point. **Eraser** (`E`) drags across strokes to remove
-  them. Esc leaves either mode.
+- **Pen** (`P`) draws freehand, in any colour from the picker beside it —
+  including straight over a document, which is the point. **Eraser** (`E`) drags
+  across strokes to remove them. Esc leaves either mode.
 - **Click a stroke or an arrow** to select it, then Del to remove it.
 - **Text, rectangle, ellipse, line, arrow** from the Add row at the bottom of the
   rail. Shapes are dragged by their outline, so an empty rectangle drawn around a

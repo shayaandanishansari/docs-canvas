@@ -85,6 +85,10 @@ Gitignored because they record real paths into private work: `boards/`,
   `{ dirs:[{name}], files:[{name, kind, ext, size, mtime, renderable}] }`.
 - `GET /__api/search?roots=&q=&all=` → recursive, capped at 300.
 - `GET /__api/recent?roots=&all=` → newest-first across those roots, capped at 200.
+- `GET /__api/ping` → `{ app:'docs-canvas', root, pid }`. Exists so a second
+  launch can tell an already-running canvas apart from an unrelated process on
+  the port. Without it the server walked to the next free port and you ended up
+  with several instances writing the same `boards/`.
 
 **Boards and assets**
 
@@ -183,6 +187,7 @@ dblclick-to-focus.
 | `liveId` | the one node whose frame currently accepts pointer events |
 | `focus` | `null`, or `{ id, geom, cam }` saved for restore on Esc |
 | `linking` / `penOn` / `eraseOn` | the three modes; mutually exclusive |
+| `penColor` / `penSize` | pen settings; colour is bound to `#penColor` |
 | `railMode` / `railView` / `showAll` | rail state, not board state |
 | `undoStack` / `redoStack` | JSON snapshots; see Undo below |
 | `zTop` | monotonic z-index counter — **never** reorder DOM to restack |
@@ -486,7 +491,7 @@ look at it.
 - **A window dragged under the top bar** can't be clicked where the bar covers it.
 - **The eraser takes whole strokes.** Partial rub-out means splitting a stroke's
   point array and re-deriving two outlines.
-- **Pen width is fixed** at 4px; only colour is exposed.
+- **Pen width is fixed** at 4px; only colour is exposed (`#penColor`).
 - **No presentation sequence.** Freeform was the explicit ask. If ordered
   storytelling is ever wanted, the shape is a per-node step number plus arrow
   keys flying the camera through them — `fly()` and `enterFocus()` are already

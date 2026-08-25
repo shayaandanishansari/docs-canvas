@@ -216,6 +216,13 @@ const server = http.createServer((req, res) => {
 
   // --- API -----------------------------------------------------------
 
+  // Lets a second launch recognise an already-running canvas rather than
+  // starting a rival server on the next port.
+  if (pathname === '/__api/ping') {
+    return send(res, 200, JSON.stringify({ ok: true, app: 'docs-canvas', root: ROOT, pid: process.pid }),
+                { 'Content-Type': MIME['.json'] });
+  }
+
   /* Open the native folder dialog. This deliberately blocks the request until
      the user dismisses it — there is no sane timeout for "a human is choosing
      a folder", so the rail shows a pending state instead. */
@@ -453,18 +460,54 @@ const server = http.createServer((req, res) => {
   });
 });
 
+function openBrowser(addr) {
+  if (process.env.NO_OPEN) return;
+  execFile('cmd', ['/c', 'start', '', addr], () => {});
+}
+
+/*
+ * If the port is busy, find out WHO has it before doing anything.
+ *
+ * This used to walk straight to the next port, which is why running start.cmd
+ * twice left you with tabs on 8765, 8766, 8767 — each a separate server, all
+ * writing the same boards/ and quietly clobbering each other's saves. An
+ * already-running canvas is not a conflict to route around; it is the thing
+ * you were trying to open.
+ */
+function whoHasPort(port) {
+  return fetch('http://127.0.0.1:' + port + '/__api/ping', { signal: AbortSignal.timeout(1500) })
+    .then((r) => r.json())
+    .then((j) => (j && j.app === 'docs-canvas' ? j : null))
+    .catch(() => null);
+}
+
 function listen(port, attempt) {
-  server.once('error', (err) => {
-    if (err.code === 'EADDRINUSE' && attempt < 12) return listen(port + 1, attempt + 1);
-    console.error(err);
+  server.once('error', async (err) => {
+    if (err.code !== 'EADDRINUSE') { console.error(err); process.exit(1); }
+
+    const mine = await whoHasPort(port);
+    if (mine) {
+      const addr = 'http://localhost:' + port + '/';
+      console.log('\n  Docs canvas is already running on ' + addr);
+      console.log('  Serving ' + mine.root);
+      console.log('  Opening that one instead of starting a second server.\n');
+      openBrowser(addr);
+      process.exit(0);
+    }
+
+    if (attempt < 12) {
+      console.log('  Port ' + port + ' is taken by something else, trying ' + (port + 1) + '…');
+      return listen(port + 1, attempt + 1);
+    }
+    console.error('Could not find a free port.');
     process.exit(1);
   });
+
   server.listen(port, '127.0.0.1', () => {
     const addr = 'http://localhost:' + port + '/';
     console.log('\n  Docs canvas serving  ' + ROOT);
     console.log('  ->  ' + addr + '\n  (ctrl+c to stop)\n');
-    if (process.env.NO_OPEN) return;
-    execFile('cmd', ['/c', 'start', '', addr], () => {});
+    openBrowser(addr);
   });
 }
 

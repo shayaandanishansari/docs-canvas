@@ -140,12 +140,17 @@ input:focus { border-color: var(--accent); }
 #undoBtn[disabled], #redoBtn[disabled] { opacity: .3; cursor: default; }
 #undoBtn[disabled]:hover, #redoBtn[disabled]:hover { background: transparent; border-color: var(--line); color: var(--ink-dim); }
 
-.pens { display: inline-flex; gap: 2px; align-items: center; }
-.pens button {
-  width: 16px; height: 16px; padding: 0; border-radius: 50%;
-  background: var(--sw); border: 1px solid rgba(255,255,255,.25);
+/* An <input>, not a <button>, and deliberately so: `#topbar button` sets a
+   background at higher specificity than any class could, which is what made
+   the old row of swatch buttons render invisible. */
+#penColor {
+  width: 28px; height: 25px; padding: 0;
+  background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  cursor: pointer; flex: 0 0 auto;
 }
-.pens button:hover { transform: scale(1.15); border-color: #fff; }
+#penColor:hover { border-color: #3a4049; }
+#penColor::-webkit-color-swatch-wrapper { padding: 3px; }
+#penColor::-webkit-color-swatch { border: none; border-radius: 3px; }
 
 #nodes { position: absolute; top: 0; left: 0; z-index: 2; }
 

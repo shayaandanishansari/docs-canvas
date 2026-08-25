@@ -1752,11 +1752,6 @@
         case 'redo': redo(); break;
         case 'pen': togglePen(); break;
         case 'erase': toggleErase(); break;
-        case 'pen-color':
-          penColor = b.dataset.color;
-          $('#penBtn').style.color = penColor;
-          if (!penOn) togglePen(true);
-          break;
         case 'help': showHelp(); break;
         case 'zoom-in': zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); break;
         case 'zoom-out': zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); break;
@@ -1804,6 +1799,13 @@
           renderRail();
           break;
       }
+    });
+
+    // 'input' fires live as the picker is dragged; 'change' only on commit.
+    // Picking a colour means you intend to draw, so it arms the pen too.
+    $('#penColor').addEventListener('input', function (e) {
+      penColor = e.target.value;
+      if (!penOn) togglePen(true);
     });
 
     $('#railToggle').addEventListener('click', function () { toggleRail(); });
