@@ -57,7 +57,7 @@ have to touch the canvas engine.
 | `index.html` | markup only | no logic whatsoever |
 | `style.css` | the dark tool chrome | dark on purpose: docs are the bright objects |
 | `shell.js` | **the platform boundary** | the only file a desktop port rewrites |
-| `app.js` | the canvas engine | ~950 lines, one IIFE, sectioned by `// ----` banners |
+| `app.js` | the canvas engine | ~1000 lines, one IIFE, sectioned by `// ----` banners |
 
 ### Server endpoints
 
@@ -113,7 +113,7 @@ JSON; reassigned on load.
 |---|---|
 | `state` | the serializable board: `camera`, `nodes`, `edges` |
 | `files` | the rail's file list from `/__api/files` |
-| `els` | `Map<nodeId, { root, tabsEl, bodyEl, shield, panes:Map }>` — DOM cache |
+| `els` | `Map<nodeId, { root, tabsEl, bodyEl, shield, focusBtn, panes:Map }>` — DOM cache |
 | `selected` / `selectedEdge` | current selection (one at a time, by design) |
 | `liveId` | the one node whose frame currently accepts pointer events |
 | `focus` | `null`, or `{ id, geom, cam }` saved for restore on Esc |
@@ -143,8 +143,11 @@ are never created at board-load time.
 
 Edges live in an SVG inside `#world`, offset by a `viewBox` of
 `-50000 -50000 100000 100000` so negative world coordinates aren't clipped.
-Strokes use `vector-effect="non-scaling-stroke"`; the arrowhead is drawn by hand
-rather than as a marker so it doesn't shrink with the camera.
+Because that SVG is inside the scaled world, every width is divided by the zoom
+to land as a fixed number of screen pixels: `--ez` (the camera's `z`) is written
+onto `#edges` by `applyCamera`, stroke widths are `calc(N / var(--ez))`, and the
+arrowhead — drawn by hand rather than as a marker — carries a matching
+`scale(1/z)` from `sizeHeads`. See invariant #5.
 
 ## Event routing
 
@@ -155,6 +158,7 @@ rather than as a marker so it doesn't shrink with the camera.
 | `.shield` | click | wake that node (`setLive`) |
 | `.chrome` | pointerdown | `startDrag`, unless the target is a button or `.tab` |
 | `.chrome` | dblclick | `enterFocus` / `exitFocus` |
+| `.chrome-actions` focus button | click | the same toggle, and the only exit affordance on screen while focused |
 | `.node` root | pointerdown **capture** | link mode interception, else `select` |
 | `.grip` | pointerdown | `startResize` |
 
@@ -166,6 +170,12 @@ node; clicking empty canvas re-shields all. Notes are never shielded.
 camera to identity, so the document genuinely *reflows* at full width rather
 than being magnified. Nothing is reparented, so no reload and scroll position
 survives the round trip. `exitFocus` restores the saved `geom` and `cam`.
+
+Getting out is Esc, another double-click, or the same title-bar button that got
+you in — `setFocusIcon` swaps it between expand and collapse and lights it while
+focused, and `syncNode` keeps it honest whichever route was taken. There is
+deliberately no floating exit bar: the node fills the screen in this mode, so
+its own chrome is already the top of the display.
 
 ---
 
@@ -253,6 +263,11 @@ and CSS under `.node.type-<x>`. `syncNode` and `render` need no changes.
 and a case in the `wireTopbar` delegated click handler. Keyboard shortcuts go in
 `onKey`, which already guards against firing while typing in inputs or
 contenteditable.
+
+**Add a shortcut to the sheet.** The shortcut list is static markup — a `.sc`
+row inside `#shortcuts` in `index.html`, description first, one `<kbd>` per key.
+It is a second view of the rail (`#rail.help`, toggled by `showHelp`), not an
+overlay, so nothing needs to know about z-index or click-through.
 
 **Change persistence.** `serialize()` is the single source of the save shape;
 `markDirty()` debounces the localStorage draft at 700ms; `saveToDisk()` writes

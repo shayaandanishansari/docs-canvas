@@ -37,7 +37,8 @@ No dependencies, no install — it's plain Node.
   back exactly where it was, scroll position intact.
 - **Arrows and sticky notes** for the story around the docs.
 
-Shortcuts are on the `?` button.
+Shortcuts live in the left sidebar — the `?` at the bottom of it, or just press
+`?`, and the file list swaps for the full list.
 
 ## Boards
 
