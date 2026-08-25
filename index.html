@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs Canvas</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%235b8cff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/_canvas/style.css">
+</head>
+<body>
+
+<div id="viewport">
+  <div id="world">
+    <svg id="edges" width="1" height="1"></svg>
+    <div id="nodes"></div>
+  </div>
+</div>
+
+<aside id="rail">
+  <header>
+    <span class="rail-title">Docs</span>
+    <span class="rail-count" id="railCount"></span>
+  </header>
+  <input id="search" type="search" placeholder="Filter files…" spellcheck="false" autocomplete="off">
+  <div id="fileList"></div>
+  <footer>
+    <button data-act="add-note" title="Sticky note">+ Note</button>
+    <button data-act="add-web" title="Web page">+ Web</button>
+  </footer>
+</aside>
+
+<div id="topbar">
+  <button id="railToggle" title="Toggle file rail (Ctrl+B)">☰</button>
+  <input id="boardName" value="default" spellcheck="false" title="Board name">
+  <button data-act="save" title="Save board to disk (Ctrl+S)">Save</button>
+  <button data-act="open" title="Open a saved board">Open</button>
+  <span class="sep"></span>
+  <button data-act="fit" title="Fit everything (F)">Fit</button>
+  <button data-act="link" id="linkBtn" title="Draw an arrow (L)">Arrow</button>
+  <span class="sep"></span>
+  <button data-act="help" title="Shortcuts (?)">?</button>
+  <span id="saveState"></span>
+</div>
+
+<div id="zoomHud"><button data-act="zoom-out">−</button><span id="zoomVal">100%</span><button data-act="zoom-in">+</button></div>
+
+<div id="focusBar" hidden>
+  <span id="focusTitle"></span>
+  <button data-act="focus-out">Esc to exit</button>
+</div>
+
+<div id="help" hidden>
+  <div class="help-card">
+    <h2>Shortcuts</h2>
+    <dl>
+      <dt>Drag empty space</dt><dd>Pan the canvas</dd>
+      <dt>Scroll / two-finger</dt><dd>Pan</dd>
+      <dt>Ctrl + scroll</dt><dd>Zoom to cursor</dd>
+      <dt>Click a frame</dt><dd>Wake it up — then it scrolls and clicks like a real page</dd>
+      <dt>Double-click a title bar</dt><dd>Webpage mode (full screen, real reflow)</dd>
+      <dt>Esc</dt><dd>Leave webpage mode / cancel</dd>
+      <dt>F</dt><dd>Fit everything on screen</dd>
+      <dt>L</dt><dd>Arrow mode — click source node, then target</dd>
+      <dt>Delete</dt><dd>Remove selected node</dd>
+      <dt>Ctrl + D</dt><dd>Duplicate selected node</dd>
+      <dt>Ctrl + S</dt><dd>Save board to disk</dd>
+      <dt>Ctrl + B</dt><dd>Toggle the file rail</dd>
+      <dt>0</dt><dd>Reset zoom to 100%</dd>
+    </dl>
+    <p class="help-foot">Drag a file from the rail onto the canvas for a new window, or onto an existing window's tab bar to add a tab.</p>
+    <button data-act="help-close">Close</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/_canvas/shell.js"></script>
+<script src="/_canvas/app.js"></script>
+</body>
+</html>

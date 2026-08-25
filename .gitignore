@@ -1,0 +1,17 @@
+# Saved boards record real paths from whatever document folder this is pointed
+# at, so they can leak private structure. They stay local.
+boards/
+*.board.json
+
+# Local runtime junk
+node_modules/
+*.log
+.env
+.env.*
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
