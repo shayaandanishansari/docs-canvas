@@ -82,6 +82,71 @@ input:focus { border-color: var(--accent); }
 #edges g.sel g.head path { fill: var(--accent); }
 #edges g path.hit { stroke: transparent; stroke-width: calc(22 / var(--ez)); pointer-events: stroke; cursor: pointer; }
 
+/* ---------- ink ----------
+   Same world-coordinate setup as #edges. perfect-freehand returns a filled
+   outline rather than a stroked line, so the ink's thickness is geometry and
+   scales with the world the way a node's size does — that is deliberate. Only
+   the things that are genuinely strokes (the hit target, the selection halo)
+   divide by --ez to hold a constant screen width, per invariant 5. */
+/* Above #nodes, unlike #edges: an arrow between two windows belongs behind
+   them, but a circle drawn round a paragraph has to sit on top of the document
+   it is marking up. Safe because only the strokes themselves take clicks. */
+#ink {
+  position: absolute; left: -50000px; top: -50000px;
+  width: 100000px; height: 100000px;
+  pointer-events: none; z-index: 3;
+  --ez: 1;
+}
+
+/* Sits above the canvas but below the rail (40) and top bar (45), so the pen
+   can be switched off or recoloured while it is active. */
+#drawSurface { position: fixed; inset: 0; z-index: 30; cursor: crosshair; }
+#drawSurface[hidden] { display: none; }   /* invariant 4: [hidden] loses to display */
+#ink path.body, #ink path.live { stroke: none; }
+#ink path.hit {
+  fill: none; stroke: transparent;
+  stroke-width: calc(14 / var(--ez));
+  pointer-events: stroke; cursor: pointer;
+}
+#ink g.sel path.body {
+  stroke: var(--accent);
+  stroke-width: calc(2 / var(--ez));
+  paint-order: stroke;          /* halo sits outside the ink, not over it */
+}
+/* While a tool is active the ink must not eat its own pointer events. */
+#viewport.drawing #ink path.hit,
+#viewport.erasing #ink path.hit { pointer-events: none; }
+#viewport.drawing { cursor: crosshair; }
+#viewport.erasing #drawSurface { cursor: none; }   /* the ring is the cursor */
+
+/* Shows the eraser's actual reach, which a CSS cursor cannot do. */
+#eraseRing {
+  position: fixed; z-index: 31; pointer-events: none;
+  transform: translate(-50%, -50%);
+  border: 1.5px solid var(--ink); border-radius: 50%;
+  background: rgba(230,233,239,.10);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.45);
+}
+#eraseRing[hidden] { display: none; }   /* invariant 4 */
+
+/* Needs #topbar to outrank `#topbar button.on`, which would otherwise paint
+   the eraser in the pen's blue and make the two modes indistinguishable. */
+#topbar #eraseBtn.on { background: #5c2f2c; border-color: #ff7a6b; color: #ffd9d4; }
+
+#undoBtn svg, #redoBtn svg {
+  display: block; width: 13px; height: 13px;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+#undoBtn[disabled], #redoBtn[disabled] { opacity: .3; cursor: default; }
+#undoBtn[disabled]:hover, #redoBtn[disabled]:hover { background: transparent; border-color: var(--line); color: var(--ink-dim); }
+
+.pens { display: inline-flex; gap: 2px; align-items: center; }
+.pens button {
+  width: 16px; height: 16px; padding: 0; border-radius: 50%;
+  background: var(--sw); border: 1px solid rgba(255,255,255,.25);
+}
+.pens button:hover { transform: scale(1.15); border-color: #fff; }
+
 #nodes { position: absolute; top: 0; left: 0; z-index: 2; }
 
 /* ---------- node ---------- */
@@ -179,6 +244,51 @@ input:focus { border-color: var(--accent); }
   white-space: pre-wrap; word-break: break-word;
 }
 
+/* text + shape nodes — the canvas draws these, so the window chrome would only
+   be in the way. It still has to exist (dragging lives on it), so it floats
+   over the top edge and fades in on hover instead of taking 34px of layout. */
+.node.type-text, .node.type-shape {
+  background: transparent; border-color: transparent; box-shadow: none;
+  overflow: visible;
+}
+.node.type-text.selected, .node.type-shape.selected {
+  border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);
+}
+.node.type-text .chrome, .node.type-shape .chrome {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 5;
+  background: var(--panel); border-bottom-color: var(--line-soft);
+  border-radius: var(--radius) var(--radius) 0 0;
+  opacity: 0; transition: opacity .12s;
+}
+.node.type-text:hover .chrome, .node.type-text.selected .chrome,
+.node.type-shape:hover .chrome, .node.type-shape.selected .chrome { opacity: 1; }
+.node.type-text .body, .node.type-shape .body {
+  position: absolute; inset: 0; background: transparent;
+}
+
+.node.type-text .note-text {
+  padding: 6px 8px;
+  color: var(--ink); font-size: 16px; line-height: 1.4;
+}
+.node.type-text:hover .body { box-shadow: inset 0 0 0 1px var(--line); }
+
+/* Only the drawn ink catches clicks — the empty part of a shape's bounding box
+   must stay click-through, or a rectangle drawn around a window blocks it. The
+   geometry re-enables pointer-events on itself in syncShape, and the chrome and
+   grips come back only once the shape is selected, so an idle shape intercepts
+   nothing but its own stroke. */
+.shape-svg { display: block; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.node.type-shape,
+.node.type-shape .body,
+.node.type-shape .pane,
+.node.type-shape .chrome,
+.node.type-shape .grip { pointer-events: none; }
+.node.type-shape.selected .chrome,
+.node.type-shape.selected .grip { pointer-events: auto; }
+.node.type-shape.selected .chrome { opacity: 1; }
+.node.type-shape .body { cursor: grab; }
+.node.type-shape.dragging .body { cursor: grabbing; }
+
 /* web node */
 .urlbar { display: flex; gap: 4px; padding: 4px 6px; background: var(--panel-2); border-bottom: 1px solid var(--line-soft); flex: 0 0 auto; }
 .urlbar input { flex: 1 1 auto; font-family: var(--mono); font-size: 11.5px; padding: 3px 7px; }
@@ -205,6 +315,19 @@ input:focus { border-color: var(--accent); }
 .rail-count { font-size: 11px; color: var(--ink-faint); }
 #rail #search { margin: 0 12px 8px; }
 #fileList { flex: 1 1 auto; overflow-y: auto; padding: 0 8px 8px; }
+#draw { flex: 0 0 auto; padding: 8px 12px 0; }
+.draw-h {
+  display: block; margin-bottom: 5px;
+  font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-faint);
+}
+.draw-row { display: flex; gap: 4px; }
+.draw-row button { flex: 0 0 auto; width: 30px; padding: 5px 0; display: grid; place-items: center; }
+.draw-row button:first-child { flex: 1 1 auto; width: auto; }
+.draw-row button svg {
+  display: block; width: 14px; height: 14px;
+  fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round;
+}
+
 #rail footer { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line-soft); }
 #rail footer button { flex: 1 1 auto; }
 #rail footer #helpToggle { flex: 0 0 auto; width: 28px; padding: 4px 0; text-align: center; }
@@ -219,11 +342,73 @@ input:focus { border-color: var(--accent); }
 }
 .f {
   display: flex; align-items: center; gap: 8px;
-  padding: 5px 7px; border-radius: 6px;
+  padding: 0 7px; min-height: 24px; border-radius: 6px;
   color: var(--ink-dim); cursor: grab; user-select: none;
 }
 .f:hover { background: var(--panel-2); color: var(--ink); }
 .f .n { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+
+/* ---------- folder tree ----------
+   Rows are flat, not nested: indentation comes from one .gd spacer per
+   ancestor level, and the elbow connectors are borders on those spacers.
+   Flat rows keep the DOM shallow and make the guides trivial to line up. */
+
+#railModes { display: flex; gap: 4px; padding: 8px 12px 6px; }
+#railModes button { flex: 1 1 auto; padding: 3px 0; font-size: 11.5px; }
+#railModes button.on { background: var(--accent-dim); border-color: var(--accent); color: #dce6ff; }
+
+/* Rows get their height from min-height, never vertical padding: a .gd spacer
+   stretches to the row's content box, so any padding would clip the guide and
+   the vertical lines would render as dashes with gaps between rows. */
+.fold > summary {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 7px; border-radius: 6px; min-height: 24px;
+  color: var(--ink-dim); font-size: 12.5px;
+  cursor: pointer; user-select: none; list-style: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary:hover { background: var(--panel-2); color: var(--ink); }
+.fold > summary .n { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.caret {
+  flex: 0 0 auto; width: 0; height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent;
+  opacity: .65; transition: transform .12s;
+}
+.fold[open] > summary .caret { transform: rotate(90deg) translateX(-1px); }
+
+.fold.root > summary { color: var(--ink); font-weight: 600; margin-top: 3px; }
+.fold.root > summary .x {
+  flex: 0 0 auto; opacity: 0; padding: 0 3px; font-size: 14px; line-height: 1; color: var(--ink-faint);
+}
+.fold.root > summary:hover .x { opacity: .7; }
+.fold.root > summary .x:hover { opacity: 1; color: var(--bad, #ff7a6b); }
+
+/* The guide column. .on means that ancestor still has siblings below it, so
+   the vertical line continues past this row. */
+.gd { flex: 0 0 auto; width: 14px; align-self: stretch; position: relative; }
+.gd.on::before,
+.gd.elbow::before {
+  content: ""; position: absolute; left: 6px; top: 0; bottom: 0;
+  border-left: 1px solid var(--line);
+}
+.gd.elbow::after {
+  content: ""; position: absolute; left: 6px; top: 50%; width: 7px;
+  border-top: 1px solid var(--line);
+}
+/* The last child stops the vertical line at the elbow, making an L. */
+.gd.elbow.last::before { bottom: 50%; }
+
+.kids { display: block; }
+.f.dim { opacity: .42; cursor: default; }
+.f.dim:hover { background: transparent; color: var(--ink-dim); }
+.f .where {
+  flex: 0 0 auto; max-width: 44%; font-size: 10.5px; color: var(--ink-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-msg { padding: 6px 10px; font-size: 11.5px; color: var(--ink-faint); font-style: italic; }
+.add-folder { width: calc(100% - 4px); margin: 10px 2px 4px; padding: 6px 0; }
 
 /* ---------- top bar / hud ---------- */
 
@@ -300,7 +485,35 @@ body.focus-mode #zoomHud { display: none; }
 /* Shortcuts live inside the rail — it swaps the file list for this panel. */
 #shortcuts { display: none; flex: 1 1 auto; overflow-y: auto; padding: 2px 12px 12px; }
 #rail.help #shortcuts { display: block; }
-#rail.help #fileList, #rail.help #search { display: none; }
+#rail.help #fileList, #rail.help #search, #rail.help #draw,
+#rail.help #railModes { display: none; }
+
+/* ---------- boards panel ---------- */
+#boardList { display: none; flex: 1 1 auto; overflow-y: auto; padding: 4px 8px 8px; }
+#rail.boards #boardList { display: block; }
+#rail.boards #fileList, #rail.boards #search,
+#rail.boards #railModes, #rail.boards #draw, #rail.boards #shortcuts { display: none; }
+#rail.boards #openBtn, #topbar button.on { background: var(--accent-dim); border-color: var(--accent); color: #dce6ff; }
+
+.brd {
+  display: flex; align-items: center; gap: 4px;
+  border-radius: 7px; margin-bottom: 2px;
+}
+.brd:hover { background: var(--panel-2); }
+.brd.current { box-shadow: inset 0 0 0 1px var(--accent-dim); }
+.brd-main { flex: 1 1 auto; min-width: 0; padding: 7px 8px; cursor: pointer; }
+.brd-n { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brd.current .brd-n { color: var(--accent); }
+.brd-sub {
+  font-size: 10.5px; color: var(--ink-faint); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.brd-x {
+  flex: 0 0 auto; opacity: 0; border-color: transparent;
+  padding: 2px 6px; font-size: 14px; line-height: 1;
+}
+.brd:hover .brd-x { opacity: .6; }
+.brd-x:hover { opacity: 1; color: #ff7a6b; border-color: var(--line); }
 
 .sc-grp {
   margin: 14px 0 6px; font-size: 10.5px; font-weight: 600;

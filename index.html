@@ -12,6 +12,7 @@
 <div id="viewport">
   <div id="world">
     <svg id="edges" width="1" height="1"></svg>
+    <svg id="ink" width="1" height="1"></svg>
     <div id="nodes"></div>
   </div>
 </div>
@@ -22,7 +23,14 @@
     <span class="rail-count" id="railCount"></span>
   </header>
 
-  <input id="search" type="search" placeholder="Filter files…" spellcheck="false" autocomplete="off">
+  <input id="search" type="search" placeholder="Search all folders…" spellcheck="false" autocomplete="off">
+
+  <div id="railModes">
+    <button data-act="rail-tree" id="railTree" class="on" title="Folder tree">Tree</button>
+    <button data-act="rail-recent" id="railRecent" title="Newest files first">Recent</button>
+    <button data-act="rail-all" id="railAll" title="Also show files the canvas can't display">All files</button>
+  </div>
+
   <div id="fileList"></div>
 
   <div id="shortcuts">
@@ -32,13 +40,22 @@
     <div class="sc"><span class="d">Zoom to cursor</span><kbd>ctrl</kbd><kbd>scroll</kbd></div>
     <div class="sc"><span class="d">Fit everything</span><kbd>F</kbd></div>
     <div class="sc"><span class="d">Reset zoom to 100%</span><kbd>0</kbd></div>
+    <div class="sc"><span class="d">Undo</span><kbd>ctrl</kbd><kbd>Z</kbd></div>
+    <div class="sc"><span class="d">Redo</span><kbd>ctrl</kbd><kbd>Y</kbd></div>
+
+    <div class="sc-grp">Marking up</div>
+    <div class="sc"><span class="d">Pen — draws over documents too</span><kbd>P</kbd></div>
+    <div class="sc"><span class="d">Eraser — drag across strokes</span><kbd>E</kbd></div>
     <div class="sc"><span class="d">Arrow mode — click source, then target</span><kbd>L</kbd></div>
+    <div class="sc"><span class="d">Paste a screenshot onto the canvas</span><kbd>ctrl</kbd><kbd>V</kbd></div>
+    <div class="sc"><span class="d">Select a stroke or arrow</span><kbd>click it</kbd></div>
+    <div class="sc"><span class="d">Leave any mode</span><kbd>esc</kbd></div>
 
     <div class="sc-grp">Windows</div>
     <div class="sc"><span class="d">Wake a frame up, then it scrolls and clicks like a real page</span><kbd>click</kbd></div>
     <div class="sc"><span class="d">Webpage mode — full screen, real reflow</span><kbd>dbl-click title</kbd></div>
     <div class="sc"><span class="d">Leave webpage mode / cancel</span><kbd>esc</kbd></div>
-    <div class="sc"><span class="d">Remove selected node</span><kbd>del</kbd></div>
+    <div class="sc"><span class="d">Remove what's selected</span><kbd>del</kbd></div>
     <div class="sc"><span class="d">Duplicate selected node</span><kbd>ctrl</kbd><kbd>D</kbd></div>
 
     <div class="sc-grp">Board</div>
@@ -46,7 +63,28 @@
     <div class="sc"><span class="d">Toggle this sidebar</span><kbd>ctrl</kbd><kbd>B</kbd></div>
     <div class="sc"><span class="d">Show these shortcuts</span><kbd>?</kbd></div>
 
-    <p class="sc-foot">Drag a file onto the canvas for a new window, or onto an existing window's tab bar to add it as a tab.</p>
+    <p class="sc-foot">Drag a file onto the canvas for a new window, or onto an existing window's tab bar to add it as a tab. + Add folder puts another folder in the tree — only for this board.</p>
+  </div>
+
+  <div id="boardList"></div>
+
+  <div id="draw">
+    <span class="draw-h">Add</span>
+    <div class="draw-row">
+      <button data-act="add-text" title="Text box">Text</button>
+      <button data-act="add-shape" data-shape="rect" title="Rectangle" aria-label="Rectangle">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3.5" width="11" height="9" rx="1"/></svg>
+      </button>
+      <button data-act="add-shape" data-shape="ellipse" title="Ellipse" aria-label="Ellipse">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><ellipse cx="8" cy="8" rx="5.5" ry="4.5"/></svg>
+      </button>
+      <button data-act="add-shape" data-shape="line" title="Line" aria-label="Line">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13L13 3"/></svg>
+      </button>
+      <button data-act="add-shape" data-shape="arrow" title="Arrow" aria-label="Arrow">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13L12 4M12 4H7.5M12 4v4.5"/></svg>
+      </button>
+    </div>
   </div>
 
   <footer>
@@ -63,17 +101,41 @@
   <span class="sep"></span>
   <input id="boardName" type="text" value="default" spellcheck="false" autocomplete="off" title="Board name">
   <button data-act="save" title="Save board to disk (Ctrl+S)">Save</button>
-  <button data-act="open" title="Open a saved board">Open</button>
+  <button data-act="save-as" title="Save a copy under a new name">Save as</button>
+  <button data-act="open" id="openBtn" title="Browse saved boards">Open</button>
+  <span class="sep"></span>
+  <button data-act="undo" id="undoBtn" title="Undo (Ctrl+Z)" aria-label="Undo">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h7a3.2 3.2 0 010 6.4H6M3 8l3-3M3 8l3 3"/></svg>
+  </button>
+  <button data-act="redo" id="redoBtn" title="Redo (Ctrl+Y)" aria-label="Redo">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8H6a3.2 3.2 0 000 6.4h4M13 8l-3-3M13 8l-3 3"/></svg>
+  </button>
   <span class="sep"></span>
   <button data-act="fit" title="Fit everything (F)">Fit</button>
   <button data-act="link" id="linkBtn" title="Draw an arrow (L)">Arrow</button>
+  <button data-act="pen" id="penBtn" title="Freehand pen (P)">Pen</button>
+  <span class="pens">
+    <button data-act="pen-color" data-color="#ffd166" style="--sw:#ffd166" title="Yellow"></button>
+    <button data-act="pen-color" data-color="#ff7a6b" style="--sw:#ff7a6b" title="Red"></button>
+    <button data-act="pen-color" data-color="#5b8cff" style="--sw:#5b8cff" title="Blue"></button>
+    <button data-act="pen-color" data-color="#9ad27a" style="--sw:#9ad27a" title="Green"></button>
+  </span>
+  <button data-act="erase" id="eraseBtn" title="Eraser — drag across strokes (E)">Erase</button>
   <span id="saveState" class="idle"></span>
 </div>
 
 <div id="zoomHud"><button data-act="zoom-out">−</button><span id="zoomVal">100%</span><button data-act="zoom-in">+</button></div>
 
+<!-- Only present while the pen or eraser is active. Documents are shielded and
+     the viewport's own handler ignores anything over a .node, so without a
+     surface of its own neither tool could reach a window — which is the main
+     thing anyone wants to draw on or clean up. -->
+<div id="drawSurface" hidden></div>
+<div id="eraseRing" hidden></div>
+
 <div id="toast"></div>
 
+<script src="/_canvas/vendor/perfect-freehand.js"></script>
 <script src="/_canvas/shell.js"></script>
 <script src="/_canvas/app.js"></script>
 </body>

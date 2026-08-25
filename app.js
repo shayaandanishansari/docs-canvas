@@ -45,13 +45,19 @@
   var MIN_Z = 0.08, MAX_Z = 2.5;
 
   var state = {
-    v: 1,
+    v: 2,
     camera: { x: 0, y: 0, z: 1 },
     nodes: [],
     edges: [],
+    strokes: [],        // reserved for the ink layer; serialised from now on
+    roots: [],          // [{ id, label, path }] — which folders THIS board shows
+    open: {},           // { rootId: ['sub', 'sub/deeper'] } — expanded folders
   };
 
-  var files = [];
+  var defaultRoot = null;     // the served folder, from the server
+  var railMode = 'tree';      // 'tree' | 'recent'
+  var showAll = false;        // include files the canvas cannot render
+  var dirCache = new Map();   // 'rootId::dir' -> listing, so reopening is instant
   var els = new Map();        // node id -> { root, tabsEl, bodyEl, shield, panes:Map }
   var selected = null;        // node id
   var selectedEdge = null;
@@ -62,7 +68,7 @@
   var zTop = 10;
   var railHidden = false;
 
-  var viewport, world, nodesEl, edgesEl;
+  var viewport, world, nodesEl, edgesEl, inkEl;
 
   function nodeById(id) {
     for (var i = 0; i < state.nodes.length; i++) if (state.nodes[i].id === id) return state.nodes[i];
@@ -79,6 +85,9 @@
       edgesEl.style.setProperty('--ez', c.z);   // stroke widths divide by this
       sizeHeads();
     }
+    // --ez is an inline style on each SVG, not an inherited one, so the ink
+    // layer needs its own write or its hit paths stop tracking the zoom.
+    if (inkEl) inkEl.style.setProperty('--ez', c.z);
   }
 
   function screenToWorld(sx, sy) {
@@ -105,11 +114,20 @@
   }
 
   function fitAll() {
-    if (!state.nodes.length) return;
+    // Ink counts as content: a board that is only annotations still has
+    // something to fit, and leaving strokes out made Fit a no-op there.
+    if (!state.nodes.length && !state.strokes.length) return;
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     state.nodes.forEach(function (n) {
       minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
       maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h);
+    });
+    state.strokes.forEach(function (s) {
+      var pad = s.size / 2;
+      s.pts.forEach(function (p) {
+        minX = Math.min(minX, p[0] - pad); minY = Math.min(minY, p[1] - pad);
+        maxX = Math.max(maxX, p[0] + pad); maxY = Math.max(maxY, p[1] + pad);
+      });
     });
     var pad = 80;
     var vw = window.innerWidth - (railHidden ? 0 : 286);
@@ -131,6 +149,15 @@
     if (kind === 'text') return { w: 640, h: 560 };
     return { w: 880, h: 620 };
   }
+
+  /* Node types the canvas draws itself, as opposed to ones that embed a
+     document. They share four exemptions: no webpage mode, no "open in a real
+     tab", no shield (their content is meant to be clicked straight away), and
+     no dblclick-to-focus. Adding a type here is how you opt into all four. */
+  var PLAIN = { note: 1, text: 1, shape: 1 };
+  function isPlain(n) { return !!PLAIN[n.type]; }
+
+  var SHAPE_LABEL = { rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', arrow: 'Arrow' };
 
   function buildNode(n) {
     var root = el('div', 'node type-' + n.type);
@@ -184,7 +211,7 @@
       return b;
     }
     var focusBtn = null;
-    if (n.type !== 'note') {
+    if (!isPlain(n)) {
       focusBtn = act('', '', function () {
         focus && focus.id === n.id ? exitFocus() : enterFocus(n);
       });
@@ -193,7 +220,7 @@
         if (n.type === 'web') { if (n.url) Shell.openExternal(n.url); }
         else {
           var t = activeTab(n);
-          if (t) Shell.openExternal(Shell.urlFor(t.path));
+          if (t) Shell.openExternal(Shell.urlFor(t));   // the tab is the file ref
         }
       });
     }
@@ -207,7 +234,7 @@
     });
     chrome.addEventListener('dblclick', function (e) {
       if (e.target.closest('button')) return;
-      if (n.type === 'note') return;
+      if (isPlain(n)) return;
       focus && focus.id === n.id ? exitFocus() : enterFocus(n);
     });
     // Capture phase so link mode preempts dragging, waking a frame, and
@@ -226,6 +253,17 @@
       setLive(n.id);
     });
 
+    // A shape has no visible title bar to grab, and giving it one would put an
+    // invisible 34px band over whatever is underneath. So a shape is dragged by
+    // its own ink instead. Capture lands on .body (see the note in startDrag —
+    // it must not be the node root).
+    if (n.type === 'shape') {
+      body.addEventListener('pointerdown', function (e) {
+        if (linking) return;                 // link mode owns the click
+        startDrag(e, n);
+      });
+    }
+
     // dropping a file onto the tab bar adds a tab
     if (n.type === 'doc') {
       tabsEl.addEventListener('dragover', function (e) {
@@ -236,8 +274,7 @@
       tabsEl.addEventListener('drop', function (e) {
         e.preventDefault(); e.stopPropagation();
         tabsEl.classList.remove('drop-hint');
-        var path = e.dataTransfer.getData('text/docpath') || e.dataTransfer.getData('text/plain');
-        var f = files.find(function (x) { return x.path === path; });
+        var f = refFromDrag(e.dataTransfer);
         if (f) { addTab(n, f); markDirty(); }
       });
     }
@@ -269,8 +306,18 @@
     var strip = rec.tabsEl;
     strip.textContent = '';
 
+    // Plain types have no tabs at all — n.tabs is undefined, so the forEach
+    // below would throw. Each one needs its own branch here.
     if (n.type === 'note') {
       strip.appendChild(el('span', 'tab active', 'Note'));
+      return;
+    }
+    if (n.type === 'text') {
+      strip.appendChild(el('span', 'tab active', 'Text'));
+      return;
+    }
+    if (n.type === 'shape') {
+      strip.appendChild(el('span', 'tab active', SHAPE_LABEL[n.kind] || 'Shape'));
       return;
     }
     if (n.type === 'web') {
@@ -302,8 +349,10 @@
   /* Panes are created on first activation and then kept — hidden, not
      destroyed — so scroll position survives tab switching. */
   function ensurePane(n, rec) {
-    if (n.type === 'note') {
-      if (!rec.panes.has('note')) {
+    // A text box is a note without the sticky styling — same editor, same
+    // one-way persistence, so they share this branch and differ only in CSS.
+    if (n.type === 'note' || n.type === 'text') {
+      if (!rec.panes.has('text')) {
         var pane = el('div', 'pane');
         var ta = el('div', 'note-text');
         ta.contentEditable = 'true';
@@ -318,9 +367,22 @@
         });
         pane.appendChild(ta);
         rec.bodyEl.insertBefore(pane, rec.shield);
-        rec.panes.set('note', { pane: pane });
-        rec.shield.hidden = true; // notes are always directly editable
+        rec.panes.set('text', { pane: pane });
+        rec.shield.hidden = true; // always directly editable
       }
+      return;
+    }
+
+    if (n.type === 'shape') {
+      if (!rec.panes.has('shape')) {
+        var sp = el('div', 'pane');
+        var sv = svg('svg', { class: 'shape-svg', preserveAspectRatio: 'none' });
+        sp.appendChild(sv);
+        rec.bodyEl.insertBefore(sp, rec.shield);
+        rec.panes.set('shape', { pane: sp, svg: sv });
+        rec.shield.hidden = true;
+      }
+      syncShape(n, rec);
       return;
     }
 
@@ -346,11 +408,85 @@
     if (!t) return;
     if (!rec.panes.has(t.id)) {
       var p = el('div', 'pane');
-      p.appendChild(Shell.createEmbed({ kind: t.kind, path: t.path }));
+      p.appendChild(Shell.createEmbed({ kind: t.kind, root: t.root, path: t.path }));
       rec.bodyEl.insertBefore(p, rec.shield);
       rec.panes.set(t.id, { pane: p });
     }
     rec.panes.forEach(function (v, k) { v.pane.hidden = (k !== t.id); });
+  }
+
+  /* Shapes are drawn at 1:1 with the node's own size rather than stretched
+     from a fixed viewBox — a stretched viewBox gives a resized ellipse a fat
+     axis and a thin one. The cost is that geometry must be rewritten whenever
+     the node resizes: syncNode covers render(), startResize covers the drag. */
+  function syncShape(n, rec) {
+    var p = rec.panes.get('shape');
+    if (!p) return;
+    var s = p.svg;
+    var w = Math.max(2, n.w), h = Math.max(2, n.h);
+    var sw = n.width || 2;
+    var pad = sw / 2 + 1;            // keep the stroke inside the box
+    var stroke = n.stroke || '#5b8cff';
+
+    var fill = n.fill || 'none';
+
+    s.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    while (s.firstChild) s.removeChild(s.firstChild);
+
+    var base = {
+      fill: fill, stroke: stroke, 'stroke-width': sw,
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+      'pointer-events': 'none',
+    };
+
+    /* A shape node is a transparent rectangle, so without this the whole
+       bounding box would swallow clicks — draw a rectangle around a window and
+       the window underneath becomes unusable. Only the ink is clickable: an
+       unfilled shape hit-tests on its stroke, a filled one on its fill too.
+       The fat invisible twin is the same trick renderEdges uses to make a
+       4px arrow grabbable. */
+    var hit = {
+      fill: fill, stroke: 'transparent',
+      'stroke-width': Math.max(sw + 14, 18),
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+      'pointer-events': fill === 'none' ? 'stroke' : 'all',
+    };
+
+    function pair(tag, geom) {
+      s.appendChild(svg(tag, Object.assign({}, geom, hit)));
+      s.appendChild(svg(tag, Object.assign({}, geom, base)));
+    }
+
+    if (n.kind === 'ellipse') {
+      pair('ellipse', {
+        cx: w / 2, cy: h / 2,
+        rx: Math.max(1, w / 2 - pad), ry: Math.max(1, h / 2 - pad),
+      });
+      return;
+    }
+
+    if (n.kind === 'line' || n.kind === 'arrow') {
+      var x1 = pad, y1 = pad, x2 = w - pad, y2 = h - pad;
+      var geom = { x1: x1, y1: y1, x2: x2, y2: y2 };
+      s.appendChild(svg('line', Object.assign({}, geom, hit, { fill: 'none', 'pointer-events': 'stroke' })));
+      s.appendChild(svg('line', Object.assign({}, geom, base, { fill: 'none' })));
+      if (n.kind === 'arrow') {
+        // Same head polygon the arrows between windows use (renderEdges).
+        var a = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+        var g = svg('g', { transform: 'translate(' + x2 + ',' + y2 + ') rotate(' + a + ')' });
+        g.appendChild(svg('path', {
+          d: 'M0,0L-17,-9L-12.5,0L-17,9Z', fill: stroke, stroke: 'none', 'pointer-events': 'all',
+        }));
+        s.appendChild(g);
+      }
+      return;
+    }
+
+    pair('rect', {
+      x: pad, y: pad,
+      width: Math.max(1, w - pad * 2), height: Math.max(1, h - pad * 2),
+      rx: n.radius || 0,
+    });
   }
 
   function showBlocked(n, rec, pane) {
@@ -388,7 +524,7 @@
     r.classList.toggle('focused', !!focus && focus.id === n.id);
     r.classList.toggle('linksrc', !!linking && linking.from === n.id);
     if (rec.focusBtn) setFocusIcon(rec.focusBtn, !!focus && focus.id === n.id);
-    if (n.type !== 'note') rec.shield.hidden = (liveId === n.id);
+    if (!isPlain(n)) rec.shield.hidden = (liveId === n.id);
     syncTabs(n, rec);
     ensurePane(n, rec);
   }
@@ -437,12 +573,10 @@
       var g = svg('g', {});
       if (selectedEdge === ed.id) g.setAttribute('class', 'sel');
 
-      var hit = svg('path', { d: d, class: 'hit' });
-      hit.addEventListener('click', function (e) {
-        e.stopPropagation();
-        selectedEdge = ed.id; selected = null;
-        render();
-      });
+      // Selected on pointerdown by the viewport handler — see the note in
+      // inkNode. A click listener here never fires, because startPan captures
+      // the pointer and pointer capture retargets mouseup.
+      var hit = svg('path', { d: d, class: 'hit', 'data-edge': ed.id });
       g.appendChild(hit);
       g.appendChild(svg('path', { d: d }));
 
@@ -459,6 +593,240 @@
       edgesEl.appendChild(g);
     });
     sizeHeads();
+  }
+
+  /* ------------------------------------------------------------------ ink
+   *
+   * A sibling SVG of #edges in the same world-coordinate trick, but rendered
+   * INCREMENTALLY. renderEdges() wipes its whole subtree on every call and
+   * runs on every pointermove during a drag — fine for a handful of edges,
+   * ruinous for hundreds of strokes.
+   *
+   * perfect-freehand returns a filled outline rather than a stroked line, so
+   * the thickness is baked into the geometry in world units. That is what we
+   * want: ink belongs to the world and should scale with it, exactly like a
+   * node's size. The pen's *feel* stays constant instead — penSize is divided
+   * by the camera zoom when a stroke is made, so drawing at 25% and at 250%
+   * both put down a line the same number of screen pixels wide.
+   *
+   * Invariant 5 still bites for anything actually stroked here: the selection
+   * halo and the invisible hit path are widths, not geometry, so they divide
+   * by --ez like the edges do.
+   */
+  var inkEls = new Map();        // stroke id -> <g>
+  var penOn = false;
+  var eraseOn = false;
+  var penSize = 4;
+  var penColor = '#ffd166';
+  var ERASE_R = 16;              // screen px; converted to world at use
+  var selectedStroke = null;
+
+  function strokePath(s) {
+    var pf = window.PerfectFreehand;
+    if (!pf) return '';
+    var pts = pf.getStroke(s.pts, {
+      size: s.size, thinning: 0.55, smoothing: 0.5, streamline: 0.5,
+      simulatePressure: s.pts[0] && s.pts[0].length < 3,
+      last: true,
+    });
+    if (!pts.length) return '';
+    var d = 'M' + pts[0][0].toFixed(2) + ',' + pts[0][1].toFixed(2);
+    for (var i = 1; i < pts.length; i++) d += 'L' + pts[i][0].toFixed(2) + ',' + pts[i][1].toFixed(2);
+    return d + 'Z';
+  }
+
+  function inkNode(s) {
+    var g = svg('g', { class: 'stroke' + (selectedStroke === s.id ? ' sel' : '') });
+    var d = strokePath(s);
+    /* Selection is claimed on pointerdown by the viewport handler, keyed off
+       this attribute — NOT by a click listener here. startPan captures the
+       pointer on pointerdown, and pointer capture retargets mouseup, so the
+       click would fire on #viewport and never reach this element. That is
+       invariant 3, and it is why arrows were unselectable too. */
+    var hit = svg('path', { d: d, class: 'hit', 'data-stroke': s.id });
+    g.appendChild(hit);
+    g.appendChild(svg('path', { d: d, fill: s.color, class: 'body' }));
+    return g;
+  }
+
+  /* Adds and removes only what changed. Called after a stroke is committed or
+     deleted, never from a pointermove path. */
+  function renderInk() {
+    inkEls.forEach(function (g, id) {
+      if (!state.strokes.some(function (s) { return s.id === id; })) { g.remove(); inkEls.delete(id); }
+    });
+    state.strokes.forEach(function (s) {
+      var g = inkEls.get(s.id);
+      if (!g) { g = inkNode(s); inkEls.set(s.id, g); inkEl.appendChild(g); return; }
+      g.setAttribute('class', 'stroke' + (selectedStroke === s.id ? ' sel' : ''));
+    });
+  }
+
+  function rebuildInk() {
+    inkEls.forEach(function (g) { g.remove(); });
+    inkEls.clear();
+    selectedStroke = null;
+    renderInk();
+  }
+
+  /* Ramer-Douglas-Peucker. A raw pointermove trail is hundreds of points per
+     stroke, which makes the board file unreadable and slow to parse. */
+  function simplify(pts, eps) {
+    if (pts.length < 3) return pts;
+    var a = pts[0], b = pts[pts.length - 1];
+    var dx = b[0] - a[0], dy = b[1] - a[1];
+    var len = Math.sqrt(dx * dx + dy * dy);
+    var dmax = 0, idx = 0;
+    for (var i = 1; i < pts.length - 1; i++) {
+      var d = len === 0
+        ? Math.hypot(pts[i][0] - a[0], pts[i][1] - a[1])
+        : Math.abs(dy * pts[i][0] - dx * pts[i][1] + b[0] * a[1] - b[1] * a[0]) / len;
+      if (d > dmax) { dmax = d; idx = i; }
+    }
+    if (dmax > eps) {
+      return simplify(pts.slice(0, idx + 1), eps).slice(0, -1)
+        .concat(simplify(pts.slice(idx), eps));
+    }
+    return [a, b];
+  }
+
+  /* Pen and eraser share one surface and are mutually exclusive. The surface
+     exists only while one of them is on, so it can never sit there quietly
+     eating clicks the way the old help overlay did. */
+  function syncTools() {
+    $('#penBtn').classList.toggle('on', penOn);
+    $('#eraseBtn').classList.toggle('on', eraseOn);
+    viewport.classList.toggle('drawing', penOn);
+    viewport.classList.toggle('erasing', eraseOn);
+    $('#drawSurface').hidden = !(penOn || eraseOn);
+    $('#eraseRing').hidden = !eraseOn;
+  }
+
+  function togglePen(force) {
+    penOn = force === undefined ? !penOn : !!force;
+    if (penOn) { eraseOn = false; if (linking) toggleLink(); }
+    syncTools();
+    if (penOn) toast('Pen: drag to draw, over documents too. Esc to stop.');
+  }
+
+  function toggleErase(force) {
+    eraseOn = force === undefined ? !eraseOn : !!force;
+    if (eraseOn) { penOn = false; if (linking) toggleLink(); }
+    syncTools();
+    if (eraseOn) toast('Eraser: drag across strokes to remove them. Esc to stop.');
+  }
+
+  /* Distance from a point to a line segment, all in world units. Comparing
+     against the stroke's own half-width means a fat stroke is easier to hit
+     than a thin one, which is what the eye expects. */
+  function distToSeg(px, py, ax, ay, bx, by) {
+    var dx = bx - ax, dy = by - ay;
+    var len2 = dx * dx + dy * dy;
+    var t = len2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / len2;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+  }
+
+  function strokeNear(s, wx, wy, radius) {
+    var reach = radius + s.size / 2;
+    if (s.pts.length === 1) return Math.hypot(wx - s.pts[0][0], wy - s.pts[0][1]) <= reach;
+    for (var i = 1; i < s.pts.length; i++) {
+      var a = s.pts[i - 1], b = s.pts[i];
+      if (distToSeg(wx, wy, a[0], a[1], b[0], b[1]) <= reach) return true;
+    }
+    return false;
+  }
+
+  /* Whole strokes, not partial rubbing-out. Splitting a stroke mid-path would
+     mean rewriting its point array and re-deriving two outlines; for marking
+     up a document, taking the whole pen mark is both simpler and what you
+     actually want. */
+  function eraseAt(sx, sy) {
+    var w = screenToWorld(sx, sy);
+    var radius = ERASE_R / state.camera.z;      // constant on screen
+    var keep = [], hit = 0;
+    state.strokes.forEach(function (s) {
+      if (strokeNear(s, w.x, w.y, radius)) hit++; else keep.push(s);
+    });
+    if (!hit) return 0;
+    state.strokes = keep;
+    if (selectedStroke && !keep.some(function (s) { return s.id === selectedStroke; })) {
+      selectedStroke = null;
+    }
+    renderInk();
+    return hit;
+  }
+
+  function startErase(e) {
+    var cap = $('#drawSurface');
+    cap.setPointerCapture(e.pointerId);
+    var removed = eraseAt(e.clientX, e.clientY);
+
+    function move(ev) {
+      moveRing(ev.clientX, ev.clientY);
+      removed += eraseAt(ev.clientX, ev.clientY);
+    }
+    function up(ev) {
+      cap.releasePointerCapture(ev.pointerId);
+      cap.removeEventListener('pointermove', move);
+      cap.removeEventListener('pointerup', up);
+      // One dirty mark for the whole sweep, not one per stroke removed.
+      if (removed) markDirty();
+    }
+    cap.addEventListener('pointermove', move);
+    cap.addEventListener('pointerup', up);
+  }
+
+  /* The ring is the eraser's cursor: a plain CSS cursor cannot show a radius
+     that changes with zoom, and knowing what you are about to remove matters. */
+  function moveRing(sx, sy) {
+    var r = $('#eraseRing');
+    r.style.left = sx + 'px';
+    r.style.top = sy + 'px';
+    r.style.width = r.style.height = (ERASE_R * 2) + 'px';
+  }
+
+  /* Claims the drag away from startPan. Same capture idiom as startDrag:
+     capture on the element the listener is on, listeners on that element,
+     release in up. */
+  function startStroke(e) {
+    var cap = $('#drawSurface');
+    var p = screenToWorld(e.clientX, e.clientY);
+    var z = state.camera.z;
+    var s = {
+      id: uid('s'),
+      // World units, so the stroke keeps its size relative to the documents
+      // around it; dividing by z is what makes the pen feel identical at
+      // every zoom level.
+      size: penSize / z,
+      color: penColor,
+      pts: [[p.x, p.y, e.pressure || 0.5]],
+    };
+
+    var live = svg('path', { fill: s.color, class: 'live' });
+    inkEl.appendChild(live);
+    cap.setPointerCapture(e.pointerId);
+
+    function move(ev) {
+      var w = screenToWorld(ev.clientX, ev.clientY);
+      s.pts.push([w.x, w.y, ev.pressure || 0.5]);
+      live.setAttribute('d', strokePath(s));   // one element, not a rebuild
+    }
+    function up(ev) {
+      cap.releasePointerCapture(ev.pointerId);
+      cap.removeEventListener('pointermove', move);
+      cap.removeEventListener('pointerup', up);
+      live.remove();
+      // A dot is a legitimate mark; anything shorter is a stray click.
+      if (s.pts.length >= 2) {
+        s.pts = simplify(s.pts, 0.6 / z);
+        state.strokes.push(s);
+        renderInk();
+        markDirty();
+      }
+    }
+    cap.addEventListener('pointermove', move);
+    cap.addEventListener('pointerup', up);
   }
 
   /* Cheap enough to run on every wheel tick: a board has a handful of edges. */
@@ -489,7 +857,7 @@
     liveId = id;
     state.nodes.forEach(function (m) {
       var rec = els.get(m.id);
-      if (!rec || m.type === 'note') return;
+      if (!rec || isPlain(m)) return;
       rec.shield.hidden = (m.id === id);
       rec.root.classList.toggle('live', m.id === id);
     });
@@ -505,19 +873,80 @@
     return n;
   }
 
+  /* A tab carries its root id alongside the path. `root` is null for a pasted
+     screenshot (which lives under _canvas/assets, outside every root) and for
+     tabs migrated from a v1 board — urlFor handles both shapes. */
+  function tabFromFile(f) {
+    return {
+      id: uid('t'), kind: f.kind, root: f.root || null,
+      path: f.path, title: f.name ? baseName(f.name) : baseName(f.path),
+    };
+  }
+
+  function sameFile(t, f) {
+    return t.path === f.path && (t.root || null) === (f.root || null);
+  }
+
   function nodeFromFile(f, x, y) {
     var s = defaultSize(f.kind);
-    var tab = { id: uid('t'), kind: f.kind, path: f.path, title: baseName(f.path) };
+    var tab = tabFromFile(f);
     return addNode({
       type: 'doc', x: Math.round(x), y: Math.round(y), w: s.w, h: s.h,
       tabs: [tab], active: tab.id,
     });
   }
 
+  /* The rail puts a whole file ref in the drag payload, so a drop needs no
+     lookup table. text/plain is kept for drags out to other applications. */
+  function refFromDrag(dt) {
+    try {
+      var raw = dt.getData(DRAG_TYPE);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return null;
+  }
+
+  /*
+   * Pasted or dropped images. Each one is written to disk first and then added
+   * exactly like a file from the rail — the node holds a path with kind
+   * 'image', which createEmbed already renders, so nothing downstream has to
+   * know a screenshot is any different from a checked-in PNG.
+   *
+   * They are deliberately not inlined into the board: the board POST caps at
+   * 8MB and the localStorage draft lane around 5MB, so a couple of screenshots
+   * would make autosave fail without saying so.
+   */
+  async function dropImages(list, x, y) {
+    var imgs = [];
+    for (var i = 0; i < list.length; i++) {
+      if (/^image\//.test(list[i].type)) imgs.push(list[i]);
+    }
+    if (!imgs.length) return;
+
+    var step = 0;
+    for (var j = 0; j < imgs.length; j++) {
+      var blob = imgs[j];
+      var ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      // A file dragged from Explorer has a real name worth keeping; a clipboard
+      // paste usually arrives as a generic "image.png", so call that what it is.
+      var hint = blob.name && !/^image\.\w+$/i.test(blob.name) ? blob.name : 'screenshot';
+      try {
+        // No root: assets live under _canvas/assets, outside every picked
+        // folder, and resolve through urlFor's bare-path branch.
+        var f = await Shell.saveAsset(blob, boardName, ext, hint);
+        f.root = null;
+        nodeFromFile(f, x + step, y + step);
+        step += 28;               // fan out, rather than stacking exactly
+      } catch (e) {
+        toast('Could not save image: ' + e.message);
+      }
+    }
+  }
+
   function addTab(n, f) {
-    var existing = n.tabs.find(function (t) { return t.path === f.path; });
+    var existing = n.tabs.find(function (t) { return sameFile(t, f); });
     if (existing) { n.active = existing.id; render(); return; }
-    var tab = { id: uid('t'), kind: f.kind, path: f.path, title: baseName(f.path) };
+    var tab = tabFromFile(f);
     n.tabs.push(tab);
     n.active = tab.id;
     render();
@@ -661,11 +1090,16 @@
     cap.setPointerCapture(e.pointerId);
     select(n.id);
 
+    // A window needs room for its chrome; a shape or a text box does not, and
+    // clamping those to 260x160 makes small annotations impossible.
+    var minW = isPlain(n) ? 40 : 260, minH = isPlain(n) ? 30 : 160;
+
     function move(ev) {
-      if (dir !== 's') n.w = Math.max(260, Math.round(ow + (ev.clientX - sx) / state.camera.z));
-      if (dir !== 'e') n.h = Math.max(160, Math.round(oh + (ev.clientY - sy) / state.camera.z));
+      if (dir !== 's') n.w = Math.max(minW, Math.round(ow + (ev.clientX - sx) / state.camera.z));
+      if (dir !== 'e') n.h = Math.max(minH, Math.round(oh + (ev.clientY - sy) / state.camera.z));
       rec.root.style.width = n.w + 'px';
       rec.root.style.height = n.h + 'px';
+      if (n.type === 'shape') syncShape(n, rec);   // geometry is size-dependent
       renderEdges();
     }
     function up(ev) {
@@ -702,49 +1136,261 @@
 
   // ---------------------------------------------------------------- rail
 
+  /* ------------------------------------------------------------------ rail
+   *
+   * Two views over the board's folders: a lazy tree, and a flat newest-first
+   * list. Typing in the search box switches to flat results regardless of
+   * mode, because a tree that has only loaded the folders you opened has
+   * nothing to filter locally — the search runs on the server.
+   */
+
+  var DRAG_TYPE = 'application/x-docs-canvas-ref';
+
+  /* Everything the canvas needs to open a file, so no lookup table is
+     required at drop time. `files.find(...)` could not survive lazy loading
+     anyway, and it silently did nothing when the entry was missing. */
+  function fileRef(f, rootId) {
+    return {
+      root: rootId || f.root || null,
+      path: f.path, name: f.name,
+      kind: f.kind, ext: f.ext,
+      renderable: f.renderable !== false,
+    };
+  }
+
+  function openFile(ref) {
+    var c = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+    var s = defaultSize(ref.kind);
+    nodeFromFile(ref, c.x - s.w / 2, c.y - s.h / 2);
+  }
+
+  /* One file row, shared by the tree and the flat list. `guides` is the
+     ancestor pattern that draws the elbow connectors. */
+  function fileRow(ref, guides, isLast) {
+    var row = el('div', 'f' + (ref.renderable ? '' : ' dim'));
+    row.title = ref.path;
+    addGuides(row, guides, isLast);
+    row.appendChild(el('span', 'dot ' + (ref.renderable ? ref.kind : 'other')));
+    row.appendChild(el('span', 'n', ref.name));
+
+    if (!ref.renderable) {
+      // Shown so the tree looks like the real folder, but there is nothing to
+      // put on the canvas, so it must not pretend to be draggable.
+      row.draggable = false;
+      row.title = ref.path + ' — the canvas cannot display this file type';
+      return row;
+    }
+
+    row.draggable = true;
+    row.addEventListener('dragstart', function (e) {
+      e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(ref));
+      e.dataTransfer.setData('text/plain', ref.path);
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+    row.addEventListener('click', function () { openFile(ref); });
+    return row;
+  }
+
+  /* The elbow connectors are pure CSS: one spacer per ancestor, carrying a
+     class that says whether that ancestor still has siblings below it, then
+     the elbow itself. Lifted from the tree in the file-structure visualiser,
+     at rail scale rather than canvas scale. */
+  function addGuides(row, guides, isLast) {
+    if (!guides) return;
+    for (var i = 0; i < guides.length; i++) {
+      row.appendChild(el('i', 'gd' + (guides[i] ? ' on' : '')));
+    }
+    if (guides.length || isLast !== undefined) {
+      row.appendChild(el('i', 'gd elbow' + (isLast ? ' last' : '')));
+    }
+  }
+
+  function dirKey(rootId, dir) { return rootId + '::' + (dir || ''); }
+
+  function isOpen(rootId, dir) {
+    var list = state.open[rootId];
+    return !!(list && list.indexOf(dir || '') !== -1);
+  }
+
+  function setOpen(rootId, dir, on) {
+    var list = state.open[rootId] || (state.open[rootId] = []);
+    var i = list.indexOf(dir || '');
+    if (on && i === -1) list.push(dir || '');
+    if (!on && i !== -1) list.splice(i, 1);
+    markDirty();
+  }
+
+  async function loadDir(rootId, dir) {
+    var key = dirKey(rootId, dir);
+    if (dirCache.has(key)) return dirCache.get(key);
+    var listing = await Shell.listDir(rootId, dir, showAll);
+    dirCache.set(key, listing);
+    return listing;
+  }
+
+  /* Build the children of one folder. Recurses only into folders that are
+     already expanded, so a collapsed branch costs one request and no more. */
+  async function buildChildren(container, rootId, dir, guides) {
+    var listing;
+    try { listing = await loadDir(rootId, dir); }
+    catch (e) { container.appendChild(el('div', 'tree-msg', 'Could not read this folder')); return; }
+
+    var total = listing.dirs.length + listing.files.length;
+    if (!total) { container.appendChild(el('div', 'tree-msg', 'empty')); return; }
+
+    var i = 0;
+    for (var d = 0; d < listing.dirs.length; d++, i++) {
+      container.appendChild(folderBranch(rootId, dir, listing.dirs[d].name, guides, i === total - 1));
+    }
+    for (var f = 0; f < listing.files.length; f++, i++) {
+      var ref = fileRef(listing.files[f], rootId);
+      ref.path = dir ? dir + '/' + listing.files[f].name : listing.files[f].name;
+      container.appendChild(fileRow(ref, guides, i === total - 1));
+    }
+  }
+
+  function folderBranch(rootId, parentDir, name, guides, isLast) {
+    var dir = parentDir ? parentDir + '/' + name : name;
+    var det = document.createElement('details');
+    det.className = 'fold';
+
+    var sum = document.createElement('summary');
+    addGuides(sum, guides, isLast);
+    sum.appendChild(el('span', 'caret'));
+    sum.appendChild(el('span', 'n', name));
+    det.appendChild(sum);
+
+    var kids = el('div', 'kids');
+    det.appendChild(kids);
+
+    var loaded = false;
+    det.addEventListener('toggle', function () {
+      setOpen(rootId, dir, det.open);
+      if (det.open && !loaded) {
+        loaded = true;
+        // A child's guides are the parent's, plus whether the parent itself
+        // still has siblings below it to draw a line past.
+        buildChildren(kids, rootId, dir, guides.concat([!isLast]));
+      }
+    });
+
+    if (isOpen(rootId, dir)) det.open = true;   // fires toggle, which loads
+    return det;
+  }
+
+  function rootBranch(root) {
+    var det = document.createElement('details');
+    det.className = 'fold root';
+
+    var sum = document.createElement('summary');
+    sum.appendChild(el('span', 'caret'));
+    sum.appendChild(el('span', 'n', root.label));
+    sum.title = root.path;
+
+    var x = el('span', 'x', '×');
+    x.title = 'Remove this folder from this board (windows using it keep working)';
+    x.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      removeRoot(root.id);
+    });
+    sum.appendChild(x);
+    det.appendChild(sum);
+
+    var kids = el('div', 'kids');
+    det.appendChild(kids);
+
+    var loaded = false;
+    det.addEventListener('toggle', function () {
+      setOpen(root.id, '', det.open);
+      if (det.open && !loaded) { loaded = true; buildChildren(kids, root.id, '', []); }
+    });
+
+    if (isOpen(root.id, '')) det.open = true;
+    return det;
+  }
+
   function renderRail() {
-    var q = $('#search').value.trim().toLowerCase();
     var list = $('#fileList');
+    var q = $('#search').value.trim();
     list.textContent = '';
 
-    var shown = files.filter(function (f) {
-      if (!q) return true;
-      return (f.name + ' ' + f.dir).toLowerCase().indexOf(q) !== -1;
-    });
+    $('#railTree').classList.toggle('on', railMode === 'tree' && !q);
+    $('#railRecent').classList.toggle('on', railMode === 'recent' && !q);
+    $('#railAll').classList.toggle('on', showAll);
 
-    $('#railCount').textContent = shown.length + (q ? ' of ' + files.length : ' files');
+    if (q) { renderFlat(list, 'search'); return; }
+    if (railMode === 'recent') { renderFlat(list, 'recent'); return; }
 
-    var groups = new Map();
-    shown.forEach(function (f) {
-      var k = f.dir || '/';
-      if (!groups.has(k)) groups.set(k, []);
-      groups.get(k).push(f);
-    });
+    if (!state.roots.length) {
+      list.appendChild(el('div', 'tree-msg', 'No folders yet.'));
+      $('#railCount').textContent = '';
+    } else {
+      state.roots.forEach(function (r) { list.appendChild(rootBranch(r)); });
+      $('#railCount').textContent = state.roots.length + (state.roots.length === 1 ? ' folder' : ' folders');
+    }
 
-    groups.forEach(function (items, dir) {
-      var g = el('div', 'grp');
-      g.appendChild(el('div', 'grp-h', dir));
-      items.forEach(function (f) {
-        var row = el('div', 'f');
-        row.draggable = true;
-        row.title = f.path;
-        row.appendChild(el('span', 'dot ' + f.kind));
-        row.appendChild(el('span', 'n', f.name));
-        row.addEventListener('dragstart', function (e) {
-          e.dataTransfer.setData('text/docpath', f.path);
-          e.dataTransfer.setData('text/plain', f.path);
-          e.dataTransfer.effectAllowed = 'copy';
-        });
-        row.addEventListener('click', function () {
-          // click drops it in the middle of what you're looking at
-          var c = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
-          var s = defaultSize(f.kind);
-          nodeFromFile(f, c.x - s.w / 2, c.y - s.h / 2);
-        });
-        g.appendChild(row);
-      });
-      list.appendChild(g);
+    var add = el('button', 'add-folder', '+ Add folder');
+    add.addEventListener('click', addRoot);
+    list.appendChild(add);
+  }
+
+  /* Flat list, used for both search results and Recent. Rows carry their
+     folder so a hit is identifiable without the tree around it. */
+  async function renderFlat(list, which) {
+    var ids = state.roots.map(function (r) { return r.id; });
+    var q = $('#search').value.trim();
+
+    list.appendChild(el('div', 'tree-msg', which === 'search' ? 'Searching…' : 'Loading…'));
+    var hits = which === 'search'
+      ? await Shell.search(ids, q, showAll)
+      : await Shell.recent(ids, showAll);
+
+    // The box may have changed while the request was in flight.
+    if ($('#search').value.trim() !== q) return;
+    list.textContent = '';
+
+    $('#railCount').textContent = hits.length + (which === 'search' ? ' found' : ' recent');
+    if (!hits.length) {
+      list.appendChild(el('div', 'tree-msg', which === 'search' ? 'Nothing matched.' : 'Nothing yet.'));
+      return;
+    }
+
+    hits.forEach(function (h) {
+      var row = fileRow(fileRef(h, h.root), null);
+      var where = (h.rootLabel || '') + (h.dir ? '/' + h.dir : '');
+      row.appendChild(el('span', 'where', where));
+      list.appendChild(row);
     });
+  }
+
+  async function addRoot() {
+    var btn = $('#fileList .add-folder');
+    if (btn) { btn.disabled = true; btn.textContent = 'Choose a folder…'; }
+    try {
+      var r = await Shell.pickFolder();
+      if (!r) return;                                   // cancelled
+      if (state.roots.some(function (x) { return x.id === r.id; })) {
+        toast('That folder is already on this board');
+        return;
+      }
+      state.roots.push({ id: r.id, label: r.label, path: r.path });
+      setOpen(r.id, '', true);                          // land expanded
+      markDirty();
+    } catch (e) {
+      toast('Could not open the folder picker: ' + e.message);
+    } finally {
+      renderRail();
+    }
+  }
+
+  /* Only ever touches this board's list. Nodes keep their root id and the
+     server keeps resolving it, so open windows are unaffected — which is why
+     this needs no confirmation. */
+  function removeRoot(id) {
+    state.roots = state.roots.filter(function (r) { return r.id !== id; });
+    delete state.open[id];
+    markDirty();
+    renderRail();
   }
 
   function toggleRail(force) {
@@ -752,18 +1398,30 @@
     $('#rail').classList.toggle('hidden', railHidden);
   }
 
-  // The shortcut sheet is a second view of the rail rather than a modal, so
-  // reading it never covers the board you are reading it about.
-  function showHelp(on) {
+  /* Panels are views OF the rail, never floating layers over the canvas.
+     Invariant 4 exists because a hidden overlay once swallowed every click on
+     the board, and a sidebar view cannot do that. */
+  var VIEW_TITLE = { files: 'Docs', help: 'Shortcuts', boards: 'Boards' };
+  var railView = 'files';
+
+  function setRailView(view) {
+    railView = view;
     var rail = $('#rail');
-    if (on === undefined) on = !rail.classList.contains('help');
-    rail.classList.toggle('help', on);
-    $('#railTitle').textContent = on ? 'Shortcuts' : 'Docs';
-    $('#railCount').hidden = on;
-    if (on) toggleRail(true);
+    rail.classList.toggle('help', view === 'help');
+    rail.classList.toggle('boards', view === 'boards');
+    $('#railTitle').textContent = VIEW_TITLE[view] || 'Docs';
+    $('#railCount').hidden = view !== 'files';
+    if (view !== 'files') toggleRail(true);
+    if (view === 'boards') renderBoards();
   }
 
-  function helpOpen() { return $('#rail').classList.contains('help') && !railHidden; }
+  function showHelp(on) {
+    if (on === undefined) on = railView !== 'help';
+    setRailView(on ? 'help' : 'files');
+  }
+
+  function helpOpen() { return railView === 'help' && !railHidden; }
+  function panelOpen() { return railView !== 'files' && !railHidden; }
 
   // ---------------------------------------------------------------- persistence
 
@@ -778,21 +1436,156 @@
 
   function serialize() {
     return {
-      v: 1,
+      v: 2,
       savedAt: Date.now(),
       camera: state.camera,
       nodes: state.nodes,
       edges: state.edges,
+      strokes: state.strokes,
+      // The full record, not just ids, so a board opened where roots.json
+      // doesn't know these folders can re-register them rather than dangle.
+      roots: state.roots,
+      open: state.open,
     };
   }
 
   function markDirty() {
+    pushUndo();          // every mutation already funnels through here
     setSaveState('unsaved', 'dirty');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(function () {
       Shell.draftSet(boardName, serialize());
       setSaveState('draft ✓', 'dirty');
     }, 700);
+  }
+
+  /* ------------------------------------------------------------------ undo
+   *
+   * Snapshots of the whole board, which is affordable because the board is
+   * small and serialize() already exists.
+   *
+   * The subtle part is putting one back. adopt() drops every element and
+   * rebuilds, which reloads every iframe — invariant 1, and the precise thing
+   * this tool exists to avoid. Undoing a typo must not reload your documents.
+   * So restore() writes the state arrays and calls render(), which diffs:
+   * syncNode leaves existing nodes alone and ensurePane early-returns on panes
+   * that already exist, so untouched frames keep their scroll position. Only
+   * a node that genuinely came back from deletion is rebuilt, and that one has
+   * to reload because its element is gone.
+   */
+  var undoStack = [], redoStack = [];
+  var UNDO_MAX = 60;
+  var pendingSnapshot = null;   // taken before a change, banked once it settles
+  var snapshotTimer;
+  var restoring = false;
+
+  function snapshotNow() {
+    return JSON.stringify({
+      nodes: state.nodes, edges: state.edges, strokes: state.strokes,
+      roots: state.roots, open: state.open,
+    });
+  }
+
+  /*
+   * Called by markDirty before the change is banked. Coalescing matters: a
+   * sticky note fires markDirty on every keystroke and a drag fires it once,
+   * but a stroke fires it per stroke. Holding the pre-change snapshot and
+   * banking it only after 450ms of quiet turns a burst of typing into one
+   * undo entry instead of one per character.
+   */
+  function pushUndo() {
+    if (restoring) return;
+    if (pendingSnapshot === null) { pendingSnapshot = lastCommitted; syncHistoryButtons(); }
+    clearTimeout(snapshotTimer);
+    snapshotTimer = setTimeout(bankUndo, 450);
+  }
+
+  function bankUndo() {
+    clearTimeout(snapshotTimer);
+    if (pendingSnapshot === null) return;
+    var now = snapshotNow();
+    if (pendingSnapshot !== now) {
+      undoStack.push(pendingSnapshot);
+      if (undoStack.length > UNDO_MAX) undoStack.shift();
+      redoStack.length = 0;        // a new edit forks the future
+    }
+    pendingSnapshot = null;
+    lastCommitted = now;
+    syncHistoryButtons();
+  }
+
+  /* An undo button that always looks available is a lie about the state of
+     the board. Pending counts as available — it banks the moment you press. */
+  function syncHistoryButtons() {
+    var u = $('#undoBtn'), r = $('#redoBtn');
+    if (!u || !r) return;
+    u.disabled = !undoStack.length && pendingSnapshot === null;
+    r.disabled = !redoStack.length;
+  }
+
+  var lastCommitted = snapshotNow();
+
+  function restore(json) {
+    var d = JSON.parse(json);
+    restoring = true;
+    state.nodes = d.nodes || [];
+    state.edges = d.edges || [];
+    state.strokes = d.strokes || [];
+    state.roots = d.roots || [];
+    state.open = d.open || {};
+    selected = null; selectedEdge = null; selectedStroke = null;
+    if (focus && !nodeById(focus.id)) focus = null;
+    if (liveId && !nodeById(liveId)) liveId = null;
+    state.nodes.forEach(function (n) { if (!n.zi) n.zi = ++zTop; });
+    render();          // diffs — does NOT rebuild surviving frames
+    syncTextPanes();
+    renderInk();
+    renderRail();
+    restoring = false;
+    lastCommitted = snapshotNow();
+    markDirty();
+    syncHistoryButtons();
+  }
+
+  /* ensurePane binds note and text content one way, writing n.text on input
+     and never reading it back — fine until undo changes n.text underneath a
+     live editor. Only touched when it actually differs, so the caret is not
+     disturbed while typing. */
+  function syncTextPanes() {
+    state.nodes.forEach(function (n) {
+      if (n.type !== 'note' && n.type !== 'text') return;
+      var rec = els.get(n.id);
+      if (!rec) return;
+      var pane = rec.panes.get('text');
+      if (!pane) return;
+      var ed = pane.pane.querySelector('.note-text');
+      if (ed && ed.textContent !== (n.text || '')) ed.textContent = n.text || '';
+    });
+  }
+
+  function undo() {
+    bankUndo();                       // fold any in-flight edit in first
+    if (!undoStack.length) { toast('Nothing to undo'); return; }
+    redoStack.push(snapshotNow());
+    restore(undoStack.pop());
+  }
+
+  function redo() {
+    bankUndo();
+    if (!redoStack.length) { toast('Nothing to redo'); return; }
+    undoStack.push(snapshotNow());
+    restore(redoStack.pop());
+  }
+
+  /* Switching boards must not leave the previous board's history around to
+     "undo" into — the ids would not even match. */
+  function resetHistory() {
+    undoStack.length = 0;
+    redoStack.length = 0;
+    pendingSnapshot = null;
+    clearTimeout(snapshotTimer);
+    lastCommitted = snapshotNow();
+    syncHistoryButtons();
   }
 
   async function saveToDisk() {
@@ -807,16 +1600,47 @@
     }
   }
 
+  /*
+   * v1 boards stored bare paths relative to the single served root. Give those
+   * tabs the default root id so they resolve through /__root/<id>/ like
+   * everything else — except assets, which live outside every root and must
+   * keep their bare path.
+   */
+  function migrate(data) {
+    if (!data || (data.v || 1) >= 2) return data;
+    var def = defaultRoot;
+    data.roots = def ? [def] : [];
+    data.open = {};
+    if (def) data.open[def.id] = [''];    // land expanded, like a new board
+    (data.nodes || []).forEach(function (n) {
+      (n.tabs || []).forEach(function (t) {
+        if (t.root) return;
+        t.root = /^_canvas\/assets\//.test(t.path) ? null : (def ? def.id : null);
+      });
+    });
+    data.v = 2;
+    return data;
+  }
+
   function adopt(data) {
+    data = migrate(data);
     state.camera = data.camera || { x: 0, y: 0, z: 1 };
     state.nodes = data.nodes || [];
     state.edges = data.edges || [];
+    state.strokes = data.strokes || [];
+    state.roots = data.roots || [];
+    state.open = data.open || {};
     state.nodes.forEach(function (n) { n.zi = ++zTop; });
     selected = null; liveId = null; selectedEdge = null;
     els.forEach(function (rec) { rec.root.remove(); });
     els.clear();
+    dirCache.clear();          // a different board may show different folders
     applyCamera();
     render();
+    rebuildInk();              // the only place ink is rebuilt wholesale
+    renderRail();
+    // Another board's history would undo into node ids that do not exist here.
+    resetHistory();
   }
 
   async function loadBoard(name) {
@@ -831,7 +1655,14 @@
       adopt(pick);
       if (pick === draft && disk) setSaveState('draft ✓', 'dirty'); else setSaveState('loaded', 'ok');
     } else {
-      adopt({ nodes: [], edges: [], camera: { x: 0, y: 0, z: 1 } });
+      // A brand-new board starts on the served folder, so the tool works out
+      // of the box before anything has been picked.
+      adopt({
+        v: 2, nodes: [], edges: [], strokes: [],
+        camera: { x: 0, y: 0, z: 1 },
+        roots: defaultRoot ? [defaultRoot] : [],
+        open: defaultRoot ? (function (o) { o[defaultRoot.id] = ['']; return o; })({}) : {},
+      });
       welcome();
     }
   }
@@ -869,14 +1700,22 @@
 
     if (e.key === 'Escape') {
       if (focus) return exitFocus();
+      if (penOn) return togglePen(false);
+      if (eraseOn) return toggleErase(false);
       if (linking) return toggleLink();
-      if (helpOpen()) { showHelp(false); return; }
+      if (panelOpen()) { setRailView('files'); return; }
       selected = null; selectedEdge = null; setLive(null); render();
       return;
     }
     if (typing) return;
 
     var mod = e.ctrlKey || e.metaKey;
+    // Note and text editors stopPropagation on their keydowns, so inside one
+    // of those Ctrl+Z stays the browser's own text undo, which is what you
+    // want while typing. These only reach the board.
+    if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+    if (mod && (e.key.toLowerCase() === 'y' ||
+                (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveToDisk(); return; }
     if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleRail(); return; }
     if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); if (selected) duplicateNode(selected); return; }
@@ -885,10 +1724,15 @@
     switch (e.key) {
       case 'f': case 'F': fitAll(); break;
       case 'l': case 'L': toggleLink(); break;
+      case 'p': case 'P': togglePen(); break;
+      case 'e': case 'E': toggleErase(); break;
       case '0': fly(function () { state.camera.z = 1; }); markDirty(); break;
       case '?': showHelp(true); break;
       case 'Delete': case 'Backspace':
-        if (selectedEdge) {
+        if (selectedStroke) {
+          state.strokes = state.strokes.filter(function (x) { return x.id !== selectedStroke; });
+          selectedStroke = null; renderInk(); markDirty();
+        } else if (selectedEdge) {
           state.edges = state.edges.filter(function (x) { return x.id !== selectedEdge; });
           selectedEdge = null; render(); markDirty();
         } else if (selected) removeNode(selected);
@@ -904,12 +1748,42 @@
         case 'save': saveToDisk(); break;
         case 'fit': fitAll(); break;
         case 'link': toggleLink(); break;
+        case 'undo': undo(); break;
+        case 'redo': redo(); break;
+        case 'pen': togglePen(); break;
+        case 'erase': toggleErase(); break;
+        case 'pen-color':
+          penColor = b.dataset.color;
+          $('#penBtn').style.color = penColor;
+          if (!penOn) togglePen(true);
+          break;
         case 'help': showHelp(); break;
         case 'zoom-in': zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); break;
         case 'zoom-out': zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); break;
         case 'add-note': {
           var c = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
           addNode({ type: 'note', x: Math.round(c.x - 130), y: Math.round(c.y - 90), w: 260, h: 180, text: '' });
+          break;
+        }
+        case 'add-text': {
+          var tc = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+          var tn = addNode({ type: 'text', x: Math.round(tc.x - 150), y: Math.round(tc.y - 40), w: 300, h: 80, text: '' });
+          var trec = els.get(tn.id);
+          var ted = trec && trec.root.querySelector('.note-text');
+          if (ted) ted.focus();     // a new text box wants the caret straight away
+          break;
+        }
+        case 'add-shape': {
+          // The button carries the kind, so one case serves all four.
+          var sc = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+          var kind = b.dataset.shape || 'rect';
+          var sz = (kind === 'line' || kind === 'arrow') ? { w: 260, h: 140 } : { w: 240, h: 160 };
+          addNode({
+            type: 'shape', kind: kind,
+            x: Math.round(sc.x - sz.w / 2), y: Math.round(sc.y - sz.h / 2),
+            w: sz.w, h: sz.h,
+            stroke: '#5b8cff', fill: 'none', width: 2,
+          });
           break;
         }
         case 'add-web': {
@@ -920,23 +1794,125 @@
           if (input) input.focus();
           break;
         }
-        case 'open': openBoardPrompt(); break;
+        case 'open': setRailView(railView === 'boards' ? 'files' : 'boards'); break;
+        case 'save-as': saveBoardAs(); break;
+        case 'rail-tree':   railMode = 'tree';   $('#search').value = ''; renderRail(); break;
+        case 'rail-recent': railMode = 'recent'; $('#search').value = ''; renderRail(); break;
+        case 'rail-all':
+          showAll = !showAll;
+          dirCache.clear();   // cached listings were filtered by the old setting
+          renderRail();
+          break;
       }
     });
 
     $('#railToggle').addEventListener('click', function () { toggleRail(); });
-    $('#search').addEventListener('input', renderRail);
-    $('#boardName').addEventListener('change', function () {
-      var v = $('#boardName').value.trim().replace(/[^a-z0-9_-]/gi, '') || 'default';
-      loadBoard(v);
+    // Search now costs a server walk, so don't fire one per keystroke.
+    var searchTimer;
+    $('#search').addEventListener('input', function () {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(renderRail, 180);
+    });
+    /* Renames the board in place — it does NOT switch boards any more. The old
+       behaviour meant typing a name silently swapped what you were looking at.
+       Opening is the Open panel; creating a copy is Save as. */
+    $('#boardName').addEventListener('change', async function () {
+      var input = $('#boardName');
+      var v = cleanBoardName(input.value);
+      if (!v || v === boardName) { input.value = boardName; return; }
+
+      // Renaming onto an existing name would overwrite that board with this
+      // one's contents, with no undo but the filesystem. Ask first.
+      var existing = await Shell.listBoards();
+      if (existing.some(function (b) { return b.name === v; }) &&
+          !window.confirm('"' + v + '" already exists. Overwrite it with this board?')) {
+        input.value = boardName;
+        return;
+      }
+
+      var from = boardName;
+      boardName = v;
+      Shell.setLastBoard(v);
+      saveToDisk();
+      // The old file stays put: rename-by-copy is the safe direction here.
+      toast('Now saving as "' + v + '" — "' + from + '" is still on disk');
     });
   }
 
-  async function openBoardPrompt() {
-    var names = await Shell.listBoards();
-    var msg = names.length ? 'Boards on disk:\n\n  ' + names.join('\n  ') + '\n\nOpen which?' : 'No saved boards yet. Name a new one:';
-    var pick = window.prompt(msg, names[0] || 'default');
-    if (pick) loadBoard(pick.trim().replace(/[^a-z0-9_-]/gi, '') || 'default');
+  function whenSaved(ms) {
+    if (!ms) return 'never saved';
+    var d = Math.floor((Date.now() - ms) / 1000);
+    if (d < 60) return 'just now';
+    if (d < 3600) return Math.floor(d / 60) + 'm ago';
+    if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+    if (d < 86400 * 7) return Math.floor(d / 86400) + 'd ago';
+    return new Date(ms).toISOString().slice(0, 10);
+  }
+
+  function cleanBoardName(s) {
+    return String(s || '').trim().replace(/[^a-z0-9_-]/gi, '');
+  }
+
+  async function renderBoards() {
+    var list = $('#boardList');
+    list.textContent = '';
+    list.appendChild(el('div', 'tree-msg', 'Loading…'));
+
+    var boards = await Shell.listBoards();
+    if (railView !== 'boards') return;      // switched away while loading
+    list.textContent = '';
+
+    if (!boards.length) {
+      list.appendChild(el('div', 'tree-msg', 'No boards saved yet. Ctrl+S saves this one.'));
+      return;
+    }
+
+    boards.forEach(function (b) {
+      var row = el('div', 'brd' + (b.name === boardName ? ' current' : ''));
+
+      var main = el('div', 'brd-main');
+      main.appendChild(el('div', 'brd-n', b.name));
+      var bits = [b.nodes + (b.nodes === 1 ? ' window' : ' windows'), whenSaved(b.savedAt)];
+      if (b.folders.length) bits.push(b.folders.join(', '));
+      main.appendChild(el('div', 'brd-sub', bits.join(' · ')));
+      main.addEventListener('click', function () {
+        if (b.name === boardName) { setRailView('files'); return; }
+        loadBoard(b.name);
+        setRailView('files');
+      });
+      row.appendChild(main);
+
+      var del = el('button', 'brd-x', '×');
+      del.title = 'Delete this board';
+      del.addEventListener('click', async function (e) {
+        e.stopPropagation();
+        // Deleting the board you are looking at would leave the canvas
+        // pointing at a file that no longer exists, so make them leave first.
+        if (b.name === boardName) { toast('Open another board before deleting this one'); return; }
+        if (!window.confirm('Delete board "' + b.name + '"? This cannot be undone.')) return;
+        try { await Shell.deleteBoard(b.name); toast('Deleted ' + b.name); renderBoards(); }
+        catch (err) { toast('Delete failed: ' + err.message); }
+      });
+      row.appendChild(del);
+
+      list.appendChild(row);
+    });
+  }
+
+  /* Save-as, split out from the name field. The field used to *switch* boards
+     on Enter, which CONTEXT.md flags as surprising — typing a name and losing
+     your board is not what "rename" looks like anywhere else. */
+  async function saveBoardAs() {
+    var pick = cleanBoardName(window.prompt('Save this board as:', boardName));
+    if (!pick) return;
+    if (pick === boardName) { saveToDisk(); return; }
+    var existing = await Shell.listBoards();
+    if (existing.some(function (b) { return b.name === pick; }) &&
+        !window.confirm('"' + pick + '" already exists. Overwrite it?')) return;
+    boardName = pick;
+    $('#boardName').value = pick;
+    Shell.setLastBoard(pick);
+    saveToDisk();
   }
 
   // ---------------------------------------------------------------- boot
@@ -946,27 +1922,88 @@
     world = $('#world');
     nodesEl = $('#nodes');
     edgesEl = $('#edges');
-    edgesEl.setAttribute('viewBox', '-50000 -50000 100000 100000');
-    edgesEl.removeAttribute('width');
-    edgesEl.removeAttribute('height');
+    inkEl = $('#ink');
+    // Both layers use the same trick: a huge viewBox centred on the origin so
+    // negative world coordinates aren't clipped, with the width/height
+    // attributes stripped so CSS sizing wins.
+    [edgesEl, inkEl].forEach(function (s) {
+      s.setAttribute('viewBox', '-50000 -50000 100000 100000');
+      s.removeAttribute('width');
+      s.removeAttribute('height');
+    });
 
     viewport.addEventListener('wheel', onWheel, { passive: false });
     viewport.addEventListener('pointerdown', function (e) {
       if (e.target.closest('.node')) return;
       if (linking) { toggleLink(); return; }
-      selected = null; selectedEdge = null;
+
+      /* Strokes and arrows are picked here, on pointerdown, because startPan
+         is about to capture the pointer and a captured pointer retargets the
+         click away from them (invariant 3). Selecting one also means not
+         panning — dragging from a stroke should not slide the canvas. */
+      var pickStroke = e.target.getAttribute && e.target.getAttribute('data-stroke');
+      var pickEdge = e.target.getAttribute && e.target.getAttribute('data-edge');
+      if (pickStroke || pickEdge) {
+        selected = null;
+        selectedStroke = pickStroke || null;
+        selectedEdge = pickEdge || null;
+        setLive(null);
+        render();
+        renderInk();
+        return;
+      }
+
+      selected = null; selectedEdge = null; selectedStroke = null;
       setLive(null);
       render();
+      renderInk();
       startPan(e);
     });
     viewport.addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
     viewport.addEventListener('drop', function (e) {
       e.preventDefault();
-      var path = e.dataTransfer.getData('text/docpath') || e.dataTransfer.getData('text/plain');
-      var f = files.find(function (x) { return x.path === path; });
-      if (!f) return;
       var c = screenToWorld(e.clientX, e.clientY);
+
+      // An image dragged in from Explorer arrives as a real File, not a path
+      // into the served folder, so it takes the same route as a paste.
+      var dropped = e.dataTransfer.files;
+      if (dropped && dropped.length) { dropImages(dropped, c.x, c.y); return; }
+
+      var f = refFromDrag(e.dataTransfer);
+      if (!f) return;
       nodeFromFile(f, c.x, c.y);
+    });
+
+    // Win+Shift+S then Ctrl+V. Ignored while typing, so pasting text into a
+    // note or the URL bar still behaves normally.
+    window.addEventListener('paste', function (e) {
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!e.clipboardData) return;
+      var imgs = [];
+      var items = e.clipboardData.items || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file' && /^image\//.test(items[i].type)) {
+          var blob = items[i].getAsFile();
+          if (blob) imgs.push(blob);
+        }
+      }
+      if (!imgs.length) return;
+      e.preventDefault();
+      var c = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+      dropImages(imgs, c.x - 310, c.y - 230);
+    });
+
+    // The pen draws on its own surface, so it reaches documents as well as
+    // empty canvas. It exists only while the mode is on.
+    var surf = $('#drawSurface');
+    surf.addEventListener('pointerdown', function (e) {
+      if (penOn) return startStroke(e);
+      if (eraseOn) return startErase(e);
+    });
+    // The ring has to track the pointer even when no button is down.
+    surf.addEventListener('pointermove', function (e) {
+      if (eraseOn) moveRing(e.clientX, e.clientY);
     });
 
     window.addEventListener('keydown', onKey);
@@ -982,13 +2019,14 @@
     wireTopbar();
     applyCamera();
 
+    // Needed before any board loads: it seeds new boards and is the root a
+    // v1 board's bare paths get migrated onto.
     try {
-      files = await Shell.listFiles();
+      defaultRoot = await Shell.defaultRoot();
     } catch (e) {
       toast('Could not reach the file server — is node _canvas/server.js running?');
     }
-    renderRail();
-    await loadBoard(Shell.lastBoard());
+    await loadBoard(Shell.lastBoard());   // adopt() renders the rail
   }
 
   boot();

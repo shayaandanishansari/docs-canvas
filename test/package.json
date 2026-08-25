@@ -1,0 +1,12 @@
+{
+  "name": "docs-canvas-test",
+  "private": true,
+  "description": "Browser tests for the docs canvas. Dev-only: the canvas itself has no dependencies and no build step.",
+  "scripts": {
+    "test": "node run.js",
+    "postinstall": "playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "^1.40.0"
+  }
+}

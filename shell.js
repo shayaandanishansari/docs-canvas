@@ -12,10 +12,25 @@
 
   var LS_PREFIX = 'docscanvas:';
 
-  function urlFor(rel) {
+  function enc(rel) {
     // Paths carry spaces and parens ("2026-03-30 B2B Research/..."), so encode
     // each segment but keep the separators.
-    return '/' + String(rel).split('/').map(encodeURIComponent).join('/');
+    return String(rel).split('/').map(encodeURIComponent).join('/');
+  }
+
+  /*
+   * Takes either a file ref ({ root, path }) or a bare path string.
+   *
+   * The bare-string branch is not legacy cruft waiting to be deleted: pasted
+   * screenshots live under _canvas/assets/, which is outside every picked
+   * root, and v1 boards store bare paths too. Both must keep resolving.
+   */
+  function urlFor(ref) {
+    if (ref && typeof ref === 'object') {
+      if (ref.root) return '/__root/' + encodeURIComponent(ref.root) + '/' + enc(ref.path);
+      return '/' + enc(ref.path);
+    }
+    return '/' + enc(ref);
   }
 
   function frame(src) {
@@ -33,27 +48,71 @@
     // so web nodes must be prepared to fall back. A desktop webview isn't.
     canEmbedWeb: false,
 
-    async listFiles() {
-      var r = await fetch('/__api/files');
-      if (!r.ok) throw new Error('file list failed: ' + r.status);
-      var j = await r.json();
-      return j.files || [];
+    /* ---- folders ------------------------------------------------------
+     * The picker runs on the server because the browser's own
+     * showDirectoryPicker() never hands back an absolute path, and without
+     * one the server cannot serve the folder — which would leave documents
+     * as blobs with every relative link broken.
+     * A desktop port replaces this one method with dialog.open({directory}).
+     */
+    async pickFolder() {
+      var r = await fetch('/__api/pick-folder', { method: 'POST' });
+      var j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || 'picker failed');
+      return j.cancelled ? null : j.root;
+    },
+
+    async defaultRoot() {
+      try {
+        var j = await (await fetch('/__api/default-root')).json();
+        return j.ok ? j.root : null;
+      } catch (e) { return null; }
+    },
+
+    /* One level. Lazy by design — a deep folder is only read when opened. */
+    async listDir(rootId, dir, all) {
+      var q = '?root=' + encodeURIComponent(rootId) +
+              '&dir=' + encodeURIComponent(dir || '') +
+              (all ? '&all=1' : '');
+      var j = await (await fetch('/__api/tree' + q)).json();
+      if (!j.ok) throw new Error(j.error || 'listing failed');
+      return j;
+    },
+
+    // Server-side because a lazily-loaded tree has nothing to filter locally.
+    async search(rootIds, q, all) {
+      var qs = '?roots=' + encodeURIComponent((rootIds || []).join(',')) +
+               '&q=' + encodeURIComponent(q || '') + (all ? '&all=1' : '');
+      try {
+        var j = await (await fetch('/__api/search' + qs)).json();
+        return j.hits || [];
+      } catch (e) { return []; }
+    },
+
+    async recent(rootIds, all) {
+      var qs = '?roots=' + encodeURIComponent((rootIds || []).join(',')) + (all ? '&all=1' : '');
+      try {
+        var j = await (await fetch('/__api/recent' + qs)).json();
+        return j.hits || [];
+      } catch (e) { return []; }
     },
 
     urlFor: urlFor,
 
     /* spec: { kind: 'html'|'pdf'|'text'|'image'|'video'|'web', path?, url? } */
     createEmbed(spec) {
+      // spec doubles as the file ref, so urlFor picks the root-qualified or
+      // the bare URL without createEmbed needing to know which.
       switch (spec.kind) {
         case 'image': {
           var img = document.createElement('img');
-          img.src = urlFor(spec.path);
+          img.src = urlFor(spec);
           img.alt = spec.path;
           return img;
         }
         case 'video': {
           var v = document.createElement('video');
-          v.src = urlFor(spec.path);
+          v.src = urlFor(spec);
           v.controls = true;
           return v;
         }
@@ -62,7 +121,7 @@
         default:
           // html, pdf, text — the browser renders all three in a frame, and
           // the PDF viewer scrolls inside it just fine.
-          return frame(urlFor(spec.path));
+          return frame(urlFor(spec));
       }
     },
 
@@ -116,12 +175,47 @@
       return r.json();
     },
 
+    /* → [{ name, savedAt, nodes, folders:[label], v }], newest first. */
     async listBoards() {
       try {
         var r = await fetch('/__api/boards');
         var j = await r.json();
         return j.boards || [];
       } catch (e) { return []; }
+    },
+
+    async deleteBoard(name) {
+      var r = await fetch('/__api/board?name=' + encodeURIComponent(name), { method: 'DELETE' });
+      if (!r.ok) throw new Error('delete failed: ' + r.status);
+      return true;
+    },
+
+    /*
+     * Write a pasted or dropped image to disk and hand back a file record
+     * shaped exactly like a row from listDir(), so the caller can treat a
+     * screenshot as an ordinary image file from that point on.
+     * Posts the Blob raw — no base64, no multipart, no JSON wrapper.
+     */
+    async saveAsset(blob, board, ext, name) {
+      var q = '?board=' + encodeURIComponent(board || 'default') +
+              '&ext=' + encodeURIComponent(ext || 'png') +
+              '&name=' + encodeURIComponent(name || 'screenshot');
+      var r = await fetch('/__api/asset' + q, {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+        body: blob,
+      });
+      var j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || !j.ok) {
+        throw new Error((j && j.error) || ('asset save failed: ' + r.status));
+      }
+      var name = j.path.split('/').pop();
+      return {
+        path: j.path, name: name,
+        dir: j.path.split('/').slice(0, -1).join('/'),
+        kind: 'image', ext: '.' + (ext || 'png'),
+        size: j.bytes, mtime: Date.now(),
+      };
     },
 
     /* Autosave lane — separate from explicit disk saves. */
