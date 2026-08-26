@@ -134,3 +134,11 @@ without, every one of which is there because it already went wrong once.
 - One thing selected at a time — no marquee, no groups.
 - A window dragged under the top bar can't be clicked where the bar covers it.
 - The eraser removes whole strokes, not parts of one.
+
+## License
+
+GNU Affero General Public License v3.0 — see [`LICENSE`](LICENSE).
+Copyright (C) 2026 Shayaan Danish Ansari.
+
+It's a network copyleft: run a modified version so others can reach it over a
+network, and they're entitled to that version's source.
