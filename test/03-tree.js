@@ -27,6 +27,17 @@ function seed(name, board) {
   fs.writeFileSync(path.join(CV, 'boards', name + '.json'), JSON.stringify(board));
 }
 
+/* The sidebar is shut at rest now — every control moved into it, so a suite has
+   to open it before it can click Save, the pen or the Add buttons. Idempotent,
+   and needed again after every reload. */
+async function openRail(page) {
+  await page.waitForSelector('#railToggle');
+  if (await page.evaluate(() => document.querySelector('#rail').classList.contains('hidden'))) {
+    await page.click('#railToggle');
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   // A v2 board showing one folder, with the root branch expanded.
   seed('default', {
@@ -43,6 +54,7 @@ function seed(name, board) {
 
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(1200);
+  await openRail(page);
 
   // ---------------------------------------------------------------- tree
   console.log('\n[tree]');
@@ -227,6 +239,7 @@ function seed(name, board) {
   await page.evaluate(() => { localStorage.clear(); });
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(900);
+  await openRail(page);
   await page.click('[data-act="open"]');
   await page.waitForTimeout(800);
   await page.evaluate(() => {

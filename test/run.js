@@ -15,6 +15,10 @@
  *  - default.json is SEEDED EMPTY rather than deleted. With no board on disk
  *    the app creates a welcome note, which silently offsets every node count
  *    in every assertion.
+ *
+ * Both boards/ and assets/ are the user's real data, so both are put back
+ * afterwards. Boards are small JSON and are held in memory; assets are
+ * screenshots and are copied aside on disk instead — see stashAssets().
  */
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -23,6 +27,7 @@ const path = require('path');
 const CANVAS = path.resolve(__dirname, '..');
 const BOARDS = path.join(CANVAS, 'boards');
 const ASSETS = path.join(CANVAS, 'assets');
+const ASSETS_STASH = path.join(CANVAS, 'assets.testbackup');
 const PORT = 8765;
 
 // Suites that predate the folder tree still expect a v1 board on disk.
@@ -33,6 +38,45 @@ const EMPTY_V1 = JSON.stringify({
 });
 
 function rmrf(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} }
+
+function countFiles(dir) {
+  let n = 0;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    n += e.isDirectory() ? countFiles(path.join(dir, e.name)) : 1;
+  }
+  return n;
+}
+
+/*
+ * resetBoards() deletes assets/ wholesale, and the pasted screenshots in there
+ * are as real as the boards that reference them: a board restored at the end
+ * of a run points at images the run deleted, and draws them as broken <img>
+ * alt text. So they are copied aside first.
+ *
+ * The copy lives on disk rather than in memory for two reasons. Screenshots
+ * are megabytes where boards are kilobytes, and a run killed with Ctrl-C never
+ * reaches the restore at all — an on-disk stash survives that, and the next
+ * run finds it and puts it back before touching anything.
+ */
+function stashAssets() {
+  if (fs.existsSync(ASSETS_STASH)) {
+    // A previous run was interrupted. That stash is the real data; whatever
+    // sits in assets/ now is that run's leftovers. Leave the stash alone.
+    console.log('found assets.testbackup from an interrupted run — restoring it at the end');
+    return;
+  }
+  if (!fs.existsSync(ASSETS)) return;
+  fs.cpSync(ASSETS, ASSETS_STASH, { recursive: true });
+}
+
+function restoreAssets() {
+  if (!fs.existsSync(ASSETS_STASH)) return;
+  rmrf(ASSETS);
+  fs.cpSync(ASSETS_STASH, ASSETS, { recursive: true });
+  const n = countFiles(ASSETS);
+  rmrf(ASSETS_STASH);
+  if (n) console.log('restored ' + n + ' asset file(s)');
+}
 
 function resetBoards(seedV1) {
   fs.mkdirSync(BOARDS, { recursive: true });
@@ -78,6 +122,7 @@ function run(file) {
       if (f.endsWith('.json')) backup.set(f, fs.readFileSync(path.join(BOARDS, f)));
     }
   } catch {}
+  stashAssets();
 
   const only = process.argv.slice(2);
   const suites = fs.readdirSync(__dirname)
@@ -110,6 +155,7 @@ function run(file) {
     resetBoards(false);
     for (const [f, buf] of backup) fs.writeFileSync(path.join(BOARDS, f), buf);
     if (backup.size) console.log('\nrestored ' + backup.size + ' board file(s)');
+    restoreAssets();
   }
 
   console.log('\n' + (failed ? failed + ' SUITE(S) FAILED' : 'ALL SUITES PASSED'));

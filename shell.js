@@ -33,10 +33,63 @@
     return '/' + enc(ref);
   }
 
+  /* A frame's scrollbar belongs to the document inside it, and no stylesheet out
+     here reaches it. Ours are same-origin — the same server serves the docs — so
+     inject one rule that keeps the thumb transparent until the canvas puts
+     `dc-show` on that document's <html>, matching how the tab bar behaves. Only
+     the thumb's colour changes: the gutter stays reserved, so a document never
+     re-wraps under the pointer. Re-applied on every load, because following a
+     link inside the frame throws the old document away. A cross-origin web node
+     throws on contentDocument and is left with its ordinary scrollbar. */
+  var QUIET_SCROLL = [
+    'html::-webkit-scrollbar,body::-webkit-scrollbar{width:12px;height:12px}',
+    'html::-webkit-scrollbar-track,body::-webkit-scrollbar-track{background:transparent}',
+    'html::-webkit-scrollbar-corner,body::-webkit-scrollbar-corner{background:transparent}',
+    'html::-webkit-scrollbar-thumb,body::-webkit-scrollbar-thumb{',
+    'background:transparent;background-clip:content-box;',
+    'border:3px solid transparent;border-radius:8px}',
+    'html.dc-show::-webkit-scrollbar-thumb,html.dc-show body::-webkit-scrollbar-thumb{',
+    'background:rgba(0,0,0,.32);background-clip:content-box}',
+  ].join('');
+
+  function blank(c) { return !c || c === 'transparent' || /rgba\(0, *0, *0, *0\)/.test(c); }
+
+  /* The scrollbar's gutter is painted by the frame ELEMENT, not by the document
+     inside it, so a transparent track over the frame's white default drew a
+     white stripe down the side of every report whose page is not white. Copy
+     the document's own canvas background — the whole shorthand, so a gradient
+     comes too — onto the frame, and the gutter disappears into the page. The
+     canvas comes from <html> unless <html> has none, in which case CSS
+     propagates <body>'s, which is where a report usually puts it. */
+  function matchBackground(f) {
+    try {
+      var d = f.contentDocument;
+      if (!d || !d.documentElement) return;
+      var cs = getComputedStyle(d.documentElement);
+      if (cs.backgroundImage === 'none' && blank(cs.backgroundColor) && d.body) {
+        cs = getComputedStyle(d.body);
+      }
+      if (cs.backgroundImage === 'none' && blank(cs.backgroundColor)) return;
+      f.style.background = cs.background;
+    } catch (e) { /* cross-origin */ }
+  }
+
+  function quietScrollbars(f) {
+    try {
+      var d = f.contentDocument;
+      if (!d || !d.documentElement || d.getElementById('dc-quiet-scroll')) return;
+      var st = d.createElement('style');
+      st.id = 'dc-quiet-scroll';
+      st.textContent = QUIET_SCROLL;
+      (d.head || d.documentElement).appendChild(st);
+    } catch (e) { /* cross-origin: not ours to style */ }
+  }
+
   function frame(src) {
     var f = document.createElement('iframe');
     f.setAttribute('loading', 'lazy');
     f.setAttribute('referrerpolicy', 'no-referrer');
+    f.addEventListener('load', function () { quietScrollbars(f); matchBackground(f); });
     f.src = src;
     return f;
   }
@@ -123,6 +176,15 @@
           // the PDF viewer scrolls inside it just fine.
           return frame(urlFor(spec));
       }
+    },
+
+    /* Paired with the style quietScrollbars injects: shows or hides the scrollbar
+       of the document inside a frame. Same-origin only — a cross-origin frame
+       throws and keeps whatever scrollbar it came with. */
+    showScrollbars(f, on) {
+      try {
+        f.contentDocument.documentElement.classList.toggle('dc-show', !!on);
+      } catch (e) { /* cross-origin */ }
     },
 
     /*

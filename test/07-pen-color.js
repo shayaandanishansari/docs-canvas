@@ -17,12 +17,24 @@ fs.writeFileSync(path.join(CV,'boards/default.json'), JSON.stringify({
 }));
 let fail = 0;
 const ck = (n,c,d) => { console.log((c?'  ok   ':'  FAIL ')+n+(c?'':'  -> '+d)); if(!c) fail++; };
+/* The sidebar is shut at rest now — every control moved into it, so a suite has
+   to open it before it can click Save, the pen or the Add buttons. Idempotent,
+   and needed again after every reload. */
+async function openRail(page) {
+  await page.waitForSelector('#railToggle');
+  if (await page.evaluate(() => document.querySelector('#rail').classList.contains('hidden'))) {
+    await page.click('#railToggle');
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   const b = await chromium.launch();
   const p = await b.newPage({ viewport: { width: 1500, height: 800 } });
   p.on('pageerror', e => { console.log('PAGEERROR', e.message); fail++; });
   await p.goto('http://127.0.0.1:8765/', { waitUntil: 'load' });
   await p.waitForTimeout(1400);
+  await openRail(p);
 
   const sw = await p.evaluate(() => {
     const el = document.querySelector('#penColor');

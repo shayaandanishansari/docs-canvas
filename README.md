@@ -27,10 +27,21 @@ Why a server at all: Chromium refuses to load `file://` iframes from a `file://`
 page, so the canvas can't embed anything unless the docs are served over http.
 No dependencies, no install — it's plain Node.
 
+## The sidebar
+
+Everything lives in one sidebar, and the sidebar starts closed — the canvas gets
+the whole window. The **burger in the top-left corner** is always there; click it
+(or `Ctrl+B`) to slide the sidebar in and out.
+
+Inside it, top to bottom: the board name, undo/redo, **Save / Save as / Open /
+Fit**, the **Arrow / Pen / colour / Erase** markup tools, the **Add** row, and
+then the folder tree. The tools stay put when the sidebar switches to the
+Shortcuts or Boards view, so nothing has to be dismissed to reach the pen.
+
 ## Folders
 
-The left rail is a folder tree. **+ Add folder** opens the normal Windows folder
-picker, and that folder becomes a branch you can expand.
+Below the tools the sidebar is a folder tree. **+ Add folder** opens the normal
+Windows folder picker, and that folder becomes a branch you can expand.
 
 - Folders belong to the **board**, not the app. Each board carries its own set,
   so a board about outreach isn't cluttered with infrastructure folders.
@@ -45,7 +56,12 @@ picker, and that folder becomes a branch you can expand.
 
 ## Using it
 
-- **Drag a doc from the rail onto the canvas** for a new window, or onto an
+- **A window is bare until you touch it.** The tab bar and the scrollbar only
+  appear while the window is hovered or selected, so an idle board is documents
+  and nothing else — each one edge to edge, with no border of ours around it.
+  Nothing reflows when they appear: the bar fades in over the document's top
+  edge, and the scrollbar only recolours a gutter that was always there.
+- **Drag a doc from the sidebar onto the canvas** for a new window, or onto an
   existing window's **tab bar** to add it as a tab. Clicking a file drops it in
   the middle of the current view.
 - **Click a page once to wake it.** Frames are shielded by default so dragging a
@@ -67,12 +83,12 @@ picker, and that folder becomes a branch you can expand.
   including straight over a document, which is the point. **Eraser** (`E`) drags
   across strokes to remove them. Esc leaves either mode.
 - **Click a stroke or an arrow** to select it, then Del to remove it.
-- **Text, rectangle, ellipse, line, arrow** from the Add row at the bottom of the
-  rail. Shapes are dragged by their outline, so an empty rectangle drawn around a
-  window doesn't block the window.
+- **Text, rectangle, ellipse, line, arrow** from the Add row in the sidebar's
+  tools. Shapes are dragged by their outline, so an empty rectangle drawn around
+  a window doesn't block the window.
 - **Notes and arrows** for the story around the docs.
 
-Shortcuts live in the left sidebar — the `?` at the bottom of it, or just press
+Shortcuts live in the sidebar — **Shortcuts** at the bottom of it, or just press
 `?`.
 
 ## Boards
@@ -132,7 +148,7 @@ without, every one of which is there because it already went wrong once.
 - Live frames render at every zoom level. Fine for the ~10-window boards this is
   built for; a 40-window board would want static cards below ~35% zoom.
 - One thing selected at a time — no marquee, no groups.
-- A window dragged under the top bar can't be clicked where the bar covers it.
+- A window dragged under the burger can't be clicked in that one corner.
 - The eraser removes whole strokes, not parts of one.
 
 ## License

@@ -309,8 +309,20 @@ through `render()` rather than `adopt()`.
 
 **2. Never `preventDefault()` on `pointerdown`.** It suppresses the
 compatibility mouse events, which kills `dblclick` — and `dblclick` is how
-webpage mode opens. Text selection is already handled by `user-select: none`.
-*(Real bug; the symptom was webpage mode silently doing nothing.)*
+webpage mode opens. *(Real bug; the symptom was webpage mode silently doing
+nothing.)*
+
+The price of that rule is that the browser is free to start a native text
+selection under a canvas gesture, so **every gesture that drags must call
+`holdSelection()`** — `startPan`, `startDrag`, `startStroke`, `startErase`.
+It sets a flag that a document-level `selectstart` handler cancels on, and the
+flag is cleared by the next `pointerup`/`pointercancel` on `window` (capture
+phase), so it ends with the gesture and cannot leak if a handler is skipped.
+`user-select: none` covers `.chrome` only and cannot do this job: applied when
+the gesture starts it does not cancel a selection already under way, and put on
+`#world` permanently it would take the notes' own editors with it.
+*(Real bug: panning across a note came up blue-highlighted, and the live
+selection then fought the pan for the pointer. Suite `08-pan-select.js`.)*
 
 **3. Nothing inside `#world` may rely on a `click` handler, and pointer capture
 goes on the handle, not the node root.** `setPointerCapture` retargets
@@ -355,6 +367,28 @@ edges. Chrome and grips activate only once the shape is selected.
 spacer stretches to the row's content box, so padding clips the guide and the
 vertical lines render as dashes with gaps. Height comes from `min-height`.
 *(Every DOM assertion passed while this was visibly broken.)*
+
+**9. Window chrome hides, but never by changing layout.** The tab bar and the
+scrollbars only appear on `:hover`, `.selected`, `.focused` or `.dragging`. Both
+do it by changing *paint*, not geometry: the bar is absolutely positioned and
+fades its opacity, the scrollbar keeps its gutter and only recolours its thumb.
+Collapsing either one would resize the document inside the frame on every hover,
+and a report that re-wraps under the pointer is unusable.
+
+**Nothing may be reserved for hidden chrome.** `.pane` is `inset: 0` and the bar
+overlays the document. Reserving its 34px instead was tried and reverted: the
+strip has to be painted *something*, and a document's page is as often a colour
+or a gradient as it is white, so every non-white report got a stripe across its
+top that no fixed colour could match. Same reason the frame element copies the
+document's canvas background (`matchBackground` in `shell.js`): the scrollbar
+gutter is painted by the frame, not by the document in it, so a transparent
+track over the frame's default white drew that stripe down the side instead.
+
+A frame's scrollbar is not reachable from here: it belongs to the document
+inside. `shell.js` injects a stylesheet into each same-origin frame on every
+`load`, and `syncScrollbars` in `app.js` toggles `dc-show` on that document's
+`<html>` — it asks the DOM the *same* selector the CSS asks, so the two cannot
+drift. Cross-origin web nodes throw, are caught, and keep their own scrollbar.
 
 ---
 
@@ -430,8 +464,9 @@ embeds nodes wholesale so new fields round-trip for free.
 `defaultSize` entry.
 
 **Add a toolbar action.** Put `data-act="thing"` on the button in `index.html`
-and a case in the `wireTopbar` delegated click handler — the listener is on
-`document`, so placement is free. Keyboard shortcuts go in `onKey`, which
+— it belongs in `#tools` in the rail; there is no floating bar any more — and a
+case in the `wireTopbar` delegated click handler. The listener is on `document`,
+so placement is free. Keyboard shortcuts go in `onKey`, which
 already guards against firing while typing.
 
 **Add a rail panel.** Add a class to `VIEW_TITLE`, a `#rail.<name>` CSS block
@@ -458,7 +493,12 @@ node test/run.js           # all suites, against a server it starts itself
 node test/run.js 03        # just one
 ```
 
-The runner backs up and restores `boards/` so running tests is not destructive.
+The runner backs up and restores both `boards/` and `assets/` so running tests is
+not destructive. Those are separate mechanisms: boards are small JSON held in
+memory, assets are screenshots copied aside to `assets.testbackup/`. A run killed
+with Ctrl-C never reaches the restore, so the asset stash is deliberately on disk
+— the next run finds it and puts it back before touching anything. (Board backup
+has no such protection; an interrupted run can still lose boards.)
 
 Rules the suites encode, all learned the hard way:
 
@@ -467,6 +507,10 @@ Rules the suites encode, all learned the hard way:
   disk the app creates a welcome note, which silently offsets every node count.
 - Nodes are added at screen centre and stack; spread them by really dragging,
   and keep them clear of the 286px rail or they land underneath it.
+- **The sidebar is shut on load, and every control lives in it.** Each suite
+  defines an idempotent `openRail(page)` and calls it after each `goto` and each
+  `reload` — otherwise a click on `[data-act=…]` fails as "element is outside of
+  the viewport" rather than as a missing button.
 - Shapes are grabbed by their ink, not a chrome bar.
 - **Drive with `page.mouse`, never `dispatchEvent`.** A dispatched click bypasses
   hit-testing and pointer capture. That is exactly how "clicking a stroke selects
@@ -488,7 +532,8 @@ look at it.
   rehydrated on the way in. Harder than it sounds — it interacts with invariant 1.
 - **Single selection.** No marquee, no groups. Adding it roughly doubles the
   input-handling code.
-- **A window dragged under the top bar** can't be clicked where the bar covers it.
+- **A window dragged under the burger** can't be clicked in that one corner. It
+  is 32x30px in the top-left, and the only chrome that floats over the canvas.
 - **The eraser takes whole strokes.** Partial rub-out means splitting a stroke's
   point array and re-deriving two outlines.
 - **Pen width is fixed** at 4px; only colour is exposed (`#penColor`).

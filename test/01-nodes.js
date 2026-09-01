@@ -14,13 +14,14 @@ const TYPED = 'Hello canvasf';  // 'f' is the typing-guard probe; it belongs in 
 const errors = [];
 let failures = 0;
 
-/* Drag each node by its chrome bar into its own column. Real pointer events, so
-   the model moves with the DOM and the layout survives a save/reload. */
+/* Drag each node into its own column. Real pointer events, so the model moves
+   with the DOM and the layout survives a save/reload. Each node type is grabbed
+   where it is actually grabbable, which is not the same place for all three. */
 async function spreadOut(page) {
   const ids = await page.$$eval('.node', ns => ns.map(n => n.dataset.id));
   for (let i = 0; i < ids.length; i++) {
-    // A shape is grabbed by its stroke, not a title bar, so find a point that
-    // is actually on the ink. Everything else grabs its chrome.
+    // A shape is grabbed by its stroke and a text box by its words — neither
+    // has a title bar. Everything else grabs its chrome.
     const from = await page.evaluate(id => {
       const n = document.querySelector('.node[data-id="' + id + '"]');
       if (!n) return null;
@@ -31,6 +32,10 @@ async function spreadOut(page) {
         return n.querySelector('line')
           ? { x: r.left + r.width / 2, y: r.top + r.height / 2 }   // diagonal midpoint
           : { x: r.left + 1, y: r.top + r.height / 2 };            // left edge stroke
+      }
+      if (n.classList.contains('type-text')) {
+        const r = n.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
       }
       const r = n.querySelector('.chrome').getBoundingClientRect();
       return { x: r.x + 60, y: r.y + r.height / 2 };
@@ -51,6 +56,17 @@ function check(name, cond, detail) {
   else { failures++; console.log('  FAIL ' + name + (detail ? '  -> ' + detail : '')); }
 }
 
+/* The sidebar is shut at rest now — every control moved into it, so a suite has
+   to open it before it can click Save, the pen or the Add buttons. Idempotent,
+   and needed again after every reload. */
+async function openRail(page) {
+  await page.waitForSelector('#railToggle');
+  if (await page.evaluate(() => document.querySelector('#rail').classList.contains('hidden'))) {
+    await page.click('#railToggle');
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
@@ -60,6 +76,7 @@ function check(name, cond, detail) {
 
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(600);
+  await openRail(page);
 
   // ---------------------------------------------------------------- add
   console.log('\n[add]');
@@ -171,7 +188,8 @@ function check(name, cond, detail) {
   // ---------------------------------------------------------------- duplicate + delete
   console.log('\n[duplicate / delete]');
   const n0 = await page.$$eval('.node', n => n.length);
-  await page.click('.node.type-text .chrome');
+  await page.click('.node.type-text .note-text');
+  await page.keyboard.press('Escape');   // the editor swallows Ctrl+D otherwise
   await page.keyboard.press('Control+d');
   await page.waitForTimeout(250);
   const n1 = await page.$$eval('.node', n => n.length);
@@ -192,6 +210,7 @@ function check(name, cond, detail) {
 
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(900);
+  await openRail(page);
 
   const survived = await page.evaluate(() => {
     const out = { text: 0, shape: 0, kinds: [], texts: [] };

@@ -32,6 +32,17 @@ async function penStroke(page, y, x0, x1) {
   await page.waitForTimeout(220);
 }
 
+/* The sidebar is shut at rest now — every control moved into it, so a suite has
+   to open it before it can click Save, the pen or the Add buttons. Idempotent,
+   and needed again after every reload. */
+async function openRail(page) {
+  await page.waitForSelector('#railToggle');
+  if (await page.evaluate(() => document.querySelector('#rail').classList.contains('hidden'))) {
+    await page.click('#railToggle');
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   fs.writeFileSync(path.join(CV, 'boards/default.json'), JSON.stringify({
     v: 2, savedAt: Date.now(), camera: { x: 0, y: 0, z: 1 },
@@ -49,6 +60,7 @@ async function penStroke(page, y, x0, x1) {
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(1300);
+  await openRail(page);
 
   // ---------------------------------------------------------------- setup
   await page.click('[data-act="pen"]');

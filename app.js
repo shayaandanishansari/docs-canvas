@@ -66,7 +66,11 @@
   var linking = null;         // null | { from: id|null }
   var boardName = 'default';
   var zTop = 10;
-  var railHidden = false;
+  /* Closed at rest. Every control now lives in the rail, so the burger is
+     the one thing on screen when nothing is open — the canvas gets the whole
+     window until you ask for the tools. Keep in step with `class="hidden"`
+     on #rail in index.html. */
+  var railHidden = true;
 
   var viewport, world, nodesEl, edgesEl, inkEl;
 
@@ -159,6 +163,41 @@
 
   var SHAPE_LABEL = { rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', arrow: 'Arrow' };
 
+  /* ---------------------------------------------------------------- text box
+   *
+   * A text box is the only node whose size is not the user's to set directly.
+   * It carries a type size (n.fs) and the box is then measured from the words,
+   * so the border always sits tight against the ink. The corner grip therefore
+   * drives n.fs rather than n.w, and fitText() derives the box from it.
+   *
+   * The measurer is one off-screen div sharing the editor's CSS (see the
+   * `#textMeasure` rule). It lives outside the camera's transform, so its
+   * rect comes back in world units at any zoom — measuring the live editor
+   * instead would hand back numbers scaled by the zoom level.
+   */
+  var TEXT_FS = 50, TEXT_FS_MIN = 8, TEXT_FS_MAX = 400;
+  var measureEl = null;
+
+  function fitText(n, rec) {
+    if (!measureEl) {
+      measureEl = el('div');
+      measureEl.id = 'textMeasure';
+      document.body.appendChild(measureEl);
+    }
+    measureEl.style.setProperty('--fs', (n.fs || TEXT_FS) + 'px');
+    // An empty box still has to be big enough to click on, so it measures a
+    // single space rather than nothing at all.
+    measureEl.textContent = n.text ? n.text : ' ';
+    var r = measureEl.getBoundingClientRect();
+    n.w = Math.ceil(r.width) + 2;    // +2 for the node's own 1px border
+    n.h = Math.ceil(r.height) + 2;
+    if (rec) {
+      rec.root.style.setProperty('--fs', (n.fs || TEXT_FS) + 'px');
+      rec.root.style.width = n.w + 'px';
+      rec.root.style.height = n.h + 'px';
+    }
+  }
+
   function buildNode(n) {
     var root = el('div', 'node type-' + n.type);
     root.dataset.id = n.id;
@@ -195,7 +234,7 @@
     body.appendChild(shield);
     root.appendChild(body);
 
-    ['e', 's', 'se'].forEach(function (dir) {
+    (n.type === 'text' ? ['se'] : ['e', 's', 'se']).forEach(function (dir) {
       var g = el('div', 'grip ' + dir);
       g.addEventListener('pointerdown', function (e) { startResize(e, n, dir); });
       root.appendChild(g);
@@ -264,6 +303,22 @@
       });
     }
 
+    /* Same problem, different answer. A text box has no bar either, but its
+       body is an editor, so a plain click has to keep meaning "put the caret
+       here". So: while the caret is elsewhere the words are a drag handle, and
+       a press that never moves falls through to focusing the editor. Once it
+       has focus the editor owns every click, and Escape or a click on the
+       canvas hands the node back. */
+    if (n.type === 'text') {
+      body.addEventListener('pointerdown', function (e) {
+        if (linking) return;
+        var ta = body.querySelector('.note-text');
+        if (!ta || document.activeElement === ta) return;
+        e.preventDefault();       // no focus-on-mousedown; the click decides
+        startDrag(e, n, function () { ta.focus(); });
+      });
+    }
+
     // dropping a file onto the tab bar adds a tab
     if (n.type === 'doc') {
       tabsEl.addEventListener('dragover', function (e) {
@@ -280,9 +335,22 @@
     }
 
     var rec = { root: root, tabsEl: tabsEl, bodyEl: body, shield: shield, focusBtn: focusBtn, panes: new Map() };
+    root.addEventListener('mouseenter', function () { syncScrollbars(rec); });
+    root.addEventListener('mouseleave', function () { syncScrollbars(rec); });
     els.set(n.id, rec);
     nodesEl.appendChild(root); // append only — never reorder
     return rec;
+  }
+
+  /* The tab bar hides itself in CSS; the scrollbar inside a frame cannot, since
+     it belongs to that document. So ask the DOM the same question the CSS asks
+     and push the answer into every frame the window holds. Keep the selector in
+     step with the reveal rule in style.css. */
+  function syncScrollbars(rec) {
+    var on = rec.root.matches(':hover, .selected, .focused, .dragging');
+    rec.root.querySelectorAll('iframe').forEach(function (f) {
+      Shell.showScrollbars(f, on);
+    });
   }
 
   /* One button, two jobs: it opens webpage mode and it is also the way out of
@@ -358,12 +426,34 @@
         ta.contentEditable = 'true';
         ta.spellcheck = false;
         ta.textContent = n.text || '';
-        ta.addEventListener('input', function () { n.text = ta.textContent; markDirty(); });
-        // Swallow keys so shortcuts don't fire mid-sentence — but let Escape
-        // out, otherwise there's no way to leave the note by keyboard.
+        /* innerText, not textContent. Pressing Enter in a contenteditable
+           breaks the line with a <div> or a <br>, and textContent cannot see
+           either — "One<br>Two" reads back as "OneTwo", so every line break
+           was being lost on reload. innerText reads what is on screen, so the
+           newlines survive into n.text, and writing them back renders as two
+           lines again because both editors are white-space: pre / pre-wrap.
+           It also matters more than it used to: a text box is measured from
+           n.text, so a lost break left the box a whole line too short. */
+        ta.addEventListener('input', function () {
+          n.text = ta.innerText;
+          if (n.type === 'text') { fitText(n, rec); renderEdges(); }
+          markDirty();
+        });
+        /* Swallow keys so shortcuts don't fire mid-sentence. Escape stops the
+           editing but is swallowed too, deliberately: it leaves the node
+           SELECTED rather than letting the board's own Escape clear the
+           selection as well. That is the only way to delete a text box now
+           that it has no chrome and so no ✕ — Escape, then Delete. A second
+           Escape, with nothing focused, deselects as it always did. */
         ta.addEventListener('keydown', function (e) {
-          if (e.key === 'Escape') { ta.blur(); return; }
+          if (e.key === 'Escape') { e.stopPropagation(); ta.blur(); select(n.id); return; }
           e.stopPropagation();
+        });
+        // A pasted paragraph must arrive as text, not as somebody else's markup.
+        ta.addEventListener('paste', function (e) {
+          e.preventDefault();
+          var txt = (e.clipboardData || window.clipboardData).getData('text/plain');
+          document.execCommand('insertText', false, txt.replace(/\r\n?/g, '\n'));
         });
         pane.appendChild(ta);
         rec.bodyEl.insertBefore(pane, rec.shield);
@@ -393,6 +483,7 @@
         rec.panes.clear();
         var wp = el('div', 'pane');
         var embed = Shell.createEmbed({ kind: 'web', url: n.url });
+        embed.addEventListener('load', function () { syncScrollbars(rec); });
         wp.appendChild(embed);
         rec.bodyEl.insertBefore(wp, rec.shield);
         rec.panes.set(n.url, { pane: wp, embed: embed });
@@ -408,7 +499,9 @@
     if (!t) return;
     if (!rec.panes.has(t.id)) {
       var p = el('div', 'pane');
-      p.appendChild(Shell.createEmbed({ kind: t.kind, root: t.root, path: t.path }));
+      var em = Shell.createEmbed({ kind: t.kind, root: t.root, path: t.path });
+      em.addEventListener('load', function () { syncScrollbars(rec); });
+      p.appendChild(em);
       rec.bodyEl.insertBefore(p, rec.shield);
       rec.panes.set(t.id, { pane: p });
     }
@@ -519,6 +612,7 @@
     r.style.width = n.w + 'px';
     r.style.height = n.h + 'px';
     r.style.zIndex = focus && focus.id === n.id ? 900 : (n.zi || 1);
+    if (n.type === 'text') fitText(n, rec);   // the words set the box, not n.w
     r.classList.toggle('selected', selected === n.id);
     r.classList.toggle('live', liveId === n.id);
     r.classList.toggle('focused', !!focus && focus.id === n.id);
@@ -527,6 +621,7 @@
     if (!isPlain(n)) rec.shield.hidden = (liveId === n.id);
     syncTabs(n, rec);
     ensurePane(n, rec);
+    syncScrollbars(rec);   // the classes just above are half of what it reads
   }
 
   function render() {
@@ -758,6 +853,7 @@
   }
 
   function startErase(e) {
+    holdSelection();
     var cap = $('#drawSurface');
     cap.setPointerCapture(e.pointerId);
     var removed = eraseAt(e.clientX, e.clientY);
@@ -790,6 +886,7 @@
      capture on the element the listener is on, listeners on that element,
      release in up. */
   function startStroke(e) {
+    holdSelection();
     var cap = $('#drawSurface');
     var p = screenToWorld(e.clientX, e.clientY);
     var z = state.camera.z;
@@ -850,6 +947,7 @@
       if (!rec) return;
       rec.root.classList.toggle('selected', m.id === id);
       rec.root.style.zIndex = focus && focus.id === m.id ? 900 : (m.zi || 1);
+      syncScrollbars(rec);
     });
   }
 
@@ -1046,24 +1144,47 @@
 
   // ---------------------------------------------------------------- drag / resize / pan
 
-  function startDrag(e, n) {
+  /* A drag on the canvas is never a text selection.
+   *
+   * pointerdown cannot be preventDefault()ed (invariant 2), so the browser is
+   * free to start a native selection underneath a pan, a stroke, or a shape
+   * drag: sweep the pointer across a note and its words come up blue, and the
+   * growing selection then fights the gesture for the pointer.
+   *
+   * selectstart is the only hook that lands after pointerdown and before the
+   * selection exists. CSS cannot do this job — user-select:none applied when
+   * the gesture starts does not cancel a selection already under way, and
+   * putting it on #world permanently would take the notes' own editors with
+   * it. So every canvas gesture calls holdSelection() and nothing releases it:
+   * the flag is cleared by the next pointerup or pointercancel anywhere, which
+   * is exactly the end of the gesture and cannot leak if a handler is skipped.
+   */
+  var noSelect = false;
+  function holdSelection() { noSelect = true; }
+
+  function startDrag(e, n, onClick) {
     if (focus) return;
     // Two subtleties, both learned the hard way:
     //  - No preventDefault(): on pointerdown it suppresses the compatibility
     //    mouse events, which kills the dblclick that opens webpage mode.
-    //    user-select:none on .chrome already stops text selection.
+    //    Text selection is stopped by holdSelection() instead.
     //  - Capture on the bar itself, not the node root. Pointer capture also
     //    retargets mousedown/mouseup, so capturing on the root would make the
     //    click land on the root — and .chrome, being its child, would never
     //    see the dblclick at all.
+    holdSelection();
     var cap = e.currentTarget;
     var rec = els.get(n.id);
     var sx = e.clientX, sy = e.clientY, ox = n.x, oy = n.y;
+    var moved = false;
     rec.root.classList.add('dragging');
     cap.setPointerCapture(e.pointerId);
     select(n.id);
 
     function move(ev) {
+      // A few pixels of slop, or a click with a shaky hand nudges the node
+      // instead of opening it for editing.
+      if (Math.abs(ev.clientX - sx) > 3 || Math.abs(ev.clientY - sy) > 3) moved = true;
       n.x = Math.round(ox + (ev.clientX - sx) / state.camera.z);
       n.y = Math.round(oy + (ev.clientY - sy) / state.camera.z);
       rec.root.style.left = n.x + 'px';
@@ -1075,6 +1196,7 @@
       cap.releasePointerCapture(ev.pointerId);
       cap.removeEventListener('pointermove', move);
       cap.removeEventListener('pointerup', up);
+      if (!moved && onClick) { n.x = ox; n.y = oy; syncNode(n); onClick(); return; }
       markDirty();
     }
     cap.addEventListener('pointermove', move);
@@ -1093,6 +1215,31 @@
     // A window needs room for its chrome; a shape or a text box does not, and
     // clamping those to 260x160 makes small annotations impossible.
     var minW = isPlain(n) ? 40 : 260, minH = isPlain(n) ? 30 : 160;
+
+    /* A text box has no free width to drag: the words fix its box. So the same
+       grip, on the same drag, changes the type size instead — pull the corner
+       out and the writing grows, and fitText re-tightens the border around it.
+       The ratio is taken against the ORIGINAL width, so the box moving out from
+       under the pointer cannot feed back into the next frame's reading. */
+    if (n.type === 'text') {
+      var ofs = n.fs || TEXT_FS;
+      var base = Math.max(20, ow);
+      var tmove = function (ev2) {
+        var target = base + (ev2.clientX - sx) / state.camera.z;
+        n.fs = Math.max(TEXT_FS_MIN, Math.min(TEXT_FS_MAX, Math.round(ofs * target / base)));
+        fitText(n, rec);
+        renderEdges();
+      };
+      var tup = function (ev2) {
+        cap.releasePointerCapture(ev2.pointerId);
+        cap.removeEventListener('pointermove', tmove);
+        cap.removeEventListener('pointerup', tup);
+        markDirty();
+      };
+      cap.addEventListener('pointermove', tmove);
+      cap.addEventListener('pointerup', tup);
+      return;
+    }
 
     function move(ev) {
       if (dir !== 's') n.w = Math.max(minW, Math.round(ow + (ev.clientX - sx) / state.camera.z));
@@ -1113,6 +1260,7 @@
   }
 
   function startPan(e) {
+    holdSelection();
     var sx = e.clientX, sy = e.clientY;
     var ox = state.camera.x, oy = state.camera.y;
     viewport.classList.add('panning');
@@ -1186,6 +1334,13 @@
       e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(ref));
       e.dataTransfer.setData('text/plain', ref.path);
       e.dataTransfer.effectAllowed = 'copy';
+      /* Tab bars are hidden until hovered, and Chromium does not update :hover
+         during a drag — so without this the tab bar you are aiming at would be
+         invisible for the whole drag. The class shows every one of them. */
+      document.body.classList.add('dragging-file');
+    });
+    row.addEventListener('dragend', function () {
+      document.body.classList.remove('dragging-file');
     });
     row.addEventListener('click', function () { openFile(ref); });
     return row;
@@ -1762,7 +1917,7 @@
         }
         case 'add-text': {
           var tc = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
-          var tn = addNode({ type: 'text', x: Math.round(tc.x - 150), y: Math.round(tc.y - 40), w: 300, h: 80, text: '' });
+          var tn = addNode({ type: 'text', x: Math.round(tc.x - 40), y: Math.round(tc.y - 32), w: 80, h: 64, fs: TEXT_FS, text: '' });
           var trec = els.get(tn.id);
           var ted = trec && trec.root.querySelector('.note-text');
           if (ted) ted.focus();     // a new text box wants the caret straight away
@@ -2007,6 +2162,14 @@
     surf.addEventListener('pointermove', function (e) {
       if (eraseOn) moveRing(e.clientX, e.clientY);
     });
+
+    // See holdSelection(). Capture phase, and on window, so the gesture's own
+    // handlers cannot skip the release.
+    document.addEventListener('selectstart', function (e) {
+      if (noSelect) e.preventDefault();
+    });
+    window.addEventListener('pointerup', function () { noSelect = false; }, true);
+    window.addEventListener('pointercancel', function () { noSelect = false; }, true);
 
     window.addEventListener('keydown', onKey);
     window.addEventListener('resize', function () {

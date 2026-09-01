@@ -38,6 +38,17 @@ async function draw(page, x, y, len) {
   await page.waitForTimeout(200);
 }
 
+/* The sidebar is shut at rest now — every control moved into it, so a suite has
+   to open it before it can click Save, the pen or the Add buttons. Idempotent,
+   and needed again after every reload. */
+async function openRail(page) {
+  await page.waitForSelector('#railToggle');
+  if (await page.evaluate(() => document.querySelector('#rail').classList.contains('hidden'))) {
+    await page.click('#railToggle');
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   fs.writeFileSync(path.join(CV, 'boards/default.json'), JSON.stringify(blank()));
   fs.writeFileSync(path.join(CV, 'boards/other.json'), JSON.stringify(blank({
@@ -50,6 +61,7 @@ async function draw(page, x, y, len) {
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(1200);
+  await openRail(page);
 
   // ================================================================ PHASE 4
   console.log('\n[board browser]');
@@ -115,11 +127,13 @@ async function draw(page, x, y, len) {
   console.log('\n[ink]');
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(500);
+  await openRail(page);
   await page.fill('#boardName', 'default');
   await page.waitForTimeout(200);
   await page.evaluate(() => { localStorage.clear(); });
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(1200);
+  await openRail(page);
 
   check('perfect-freehand loaded as a plain script',
         await page.evaluate(() => typeof window.PerfectFreehand === 'object'

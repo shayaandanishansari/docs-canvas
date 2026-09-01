@@ -24,6 +24,17 @@ const R = JSON.parse(fs.readFileSync(path.join(CV, 'roots.json'), 'utf8')).roots
 const nodes = n => n.$$eval('.node', a => a.length);
 const strokes = n => n.$$eval('#ink g.stroke', a => a.length);
 
+/* The sidebar is shut at rest now — every control moved into it, so a suite has
+   to open it before it can click Save, the pen or the Add buttons. Idempotent,
+   and needed again after every reload. */
+async function openRail(page) {
+  await page.waitForSelector('#railToggle');
+  if (await page.evaluate(() => document.querySelector('#rail').classList.contains('hidden'))) {
+    await page.click('#railToggle');
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   fs.writeFileSync(path.join(CV, 'boards/default.json'), JSON.stringify({
     v: 2, savedAt: Date.now(), camera: { x: 0, y: 0, z: 1 },
@@ -38,6 +49,7 @@ const strokes = n => n.$$eval('#ink g.stroke', a => a.length);
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(1400);
+  await openRail(page);
 
   // ---------------------------------------------------------------- basics
   console.log('\n[undo / redo basics]');

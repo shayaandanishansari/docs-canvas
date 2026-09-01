@@ -17,6 +17,17 @@ function check(name, cond, detail) {
   else { failures++; console.log('  FAIL ' + name + (detail ? '  -> ' + detail : '')); }
 }
 
+/* The sidebar is shut at rest now — every control moved into it, so a suite has
+   to open it before it can click Save, the pen or the Add buttons. Idempotent,
+   and needed again after every reload. */
+async function openRail(page) {
+  await page.waitForSelector('#railToggle');
+  if (await page.evaluate(() => document.querySelector('#rail').classList.contains('hidden'))) {
+    await page.click('#railToggle');
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
@@ -25,6 +36,7 @@ function check(name, cond, detail) {
 
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(600);
+  await openRail(page);
 
   // ---------------------------------------------------------------- paste
   console.log('\n[paste]');
@@ -79,6 +91,7 @@ function check(name, cond, detail) {
   await page.waitForTimeout(800);
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(1500);
+  await openRail(page);
 
   const after = await page.evaluate(() => {
     const img = document.querySelector('.node img');
