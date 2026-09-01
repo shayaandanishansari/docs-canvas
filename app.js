@@ -59,8 +59,17 @@
   var showAll = false;        // include files the canvas cannot render
   var dirCache = new Map();   // 'rootId::dir' -> listing, so reopening is instant
   var els = new Map();        // node id -> { root, tabsEl, bodyEl, shield, panes:Map }
-  var selected = null;        // node id
-  var selectedEdge = null;
+
+  /* Selection is a set per kind, not one slot each.
+     The marquee is the resting tool — a left drag across empty canvas bands
+     whatever it touches — so every consumer has to cope with "more than one",
+     and the old single-node case is simply a set of size 1. `selNodes` is the
+     only thing that decides a node's `.selected` class; nothing else may write
+     it. Panning moved to the right button to free the left one; see
+     startMarquee. */
+  var selNodes = new Set();
+  var selStrokes = new Set();
+  var selEdges = new Set();
   var liveId = null;          // node whose frame currently takes pointer events
   var focus = null;           // { id, geom, cam }
   var linking = null;         // null | { from: id|null }
@@ -279,12 +288,15 @@
     // Capture phase so link mode preempts dragging, waking a frame, and
     // editing a note — all node types answer clicks the same way while linking.
     root.addEventListener('pointerdown', function (e) {
+      // The right button belongs to the pan, over a window as much as anywhere
+      // else, and a pan must not change what is selected on its way past.
+      if (e.button !== 0) return;
       if (linking) {
         e.preventDefault(); e.stopPropagation();
         handleLinkClick(n);
         return;
       }
-      select(n.id);
+      claimNode(n.id, e);
     }, true);
 
     shield.addEventListener('click', function (e) {
@@ -446,7 +458,7 @@
            that it has no chrome and so no ✕ — Escape, then Delete. A second
            Escape, with nothing focused, deselects as it always did. */
         ta.addEventListener('keydown', function (e) {
-          if (e.key === 'Escape') { e.stopPropagation(); ta.blur(); select(n.id); return; }
+          if (e.key === 'Escape') { e.stopPropagation(); ta.blur(); selectOnlyNode(n.id); return; }
           e.stopPropagation();
         });
         // A pasted paragraph must arrive as text, not as somebody else's markup.
@@ -613,7 +625,7 @@
     r.style.height = n.h + 'px';
     r.style.zIndex = focus && focus.id === n.id ? 900 : (n.zi || 1);
     if (n.type === 'text') fitText(n, rec);   // the words set the box, not n.w
-    r.classList.toggle('selected', selected === n.id);
+    r.classList.toggle('selected', selNodes.has(n.id));
     r.classList.toggle('live', liveId === n.id);
     r.classList.toggle('focused', !!focus && focus.id === n.id);
     r.classList.toggle('linksrc', !!linking && linking.from === n.id);
@@ -656,21 +668,30 @@
     return e;
   }
 
+  /* Where an arrow actually runs, border to border. Drawing it and hit-testing
+     it against the marquee are two callers that must agree, so there is one
+     function for it. */
+  function edgeSeg(ed) {
+    var a = nodeById(ed.from), b = nodeById(ed.to);
+    if (!a || !b) return null;
+    var ca = center(a), cb = center(b);
+    return { p1: borderPoint(a, ca, cb), p2: borderPoint(b, cb, ca) };
+  }
+
   function renderEdges() {
     edgesEl.textContent = '';
     state.edges.forEach(function (ed) {
-      var a = nodeById(ed.from), b = nodeById(ed.to);
-      if (!a || !b) return;
-      var ca = center(a), cb = center(b);
-      var p1 = borderPoint(a, ca, cb), p2 = borderPoint(b, cb, ca);
+      var seg = edgeSeg(ed);
+      if (!seg) return;
+      var p1 = seg.p1, p2 = seg.p2;
       var d = 'M' + p1.x + ',' + p1.y + 'L' + p2.x + ',' + p2.y;
 
       var g = svg('g', {});
-      if (selectedEdge === ed.id) g.setAttribute('class', 'sel');
+      if (selEdges.has(ed.id)) g.setAttribute('class', 'sel');
 
       // Selected on pointerdown by the viewport handler — see the note in
-      // inkNode. A click listener here never fires, because startPan captures
-      // the pointer and pointer capture retargets mouseup.
+      // inkNode. A click listener here never fires, because the marquee
+      // captures the pointer and pointer capture retargets mouseup.
       var hit = svg('path', { d: d, class: 'hit', 'data-edge': ed.id });
       g.appendChild(hit);
       g.appendChild(svg('path', { d: d }));
@@ -714,7 +735,6 @@
   var penSize = 4;
   var penColor = '#ffd166';
   var ERASE_R = 16;              // screen px; converted to world at use
-  var selectedStroke = null;
 
   function strokePath(s) {
     var pf = window.PerfectFreehand;
@@ -731,13 +751,14 @@
   }
 
   function inkNode(s) {
-    var g = svg('g', { class: 'stroke' + (selectedStroke === s.id ? ' sel' : '') });
+    var g = svg('g', { class: 'stroke' + (selStrokes.has(s.id) ? ' sel' : '') });
     var d = strokePath(s);
     /* Selection is claimed on pointerdown by the viewport handler, keyed off
-       this attribute — NOT by a click listener here. startPan captures the
-       pointer on pointerdown, and pointer capture retargets mouseup, so the
-       click would fire on #viewport and never reach this element. That is
-       invariant 3, and it is why arrows were unselectable too. */
+       this attribute — NOT by a click listener here. Whichever gesture the
+       press turns into captures the pointer on pointerdown, and pointer
+       capture retargets mouseup, so the click would fire on #viewport and
+       never reach this element. That is invariant 3, and it is why arrows
+       were unselectable too. */
     var hit = svg('path', { d: d, class: 'hit', 'data-stroke': s.id });
     g.appendChild(hit);
     g.appendChild(svg('path', { d: d, fill: s.color, class: 'body' }));
@@ -753,14 +774,14 @@
     state.strokes.forEach(function (s) {
       var g = inkEls.get(s.id);
       if (!g) { g = inkNode(s); inkEls.set(s.id, g); inkEl.appendChild(g); return; }
-      g.setAttribute('class', 'stroke' + (selectedStroke === s.id ? ' sel' : ''));
+      g.setAttribute('class', 'stroke' + (selStrokes.has(s.id) ? ' sel' : ''));
     });
   }
 
   function rebuildInk() {
     inkEls.forEach(function (g) { g.remove(); });
     inkEls.clear();
-    selectedStroke = null;
+    selStrokes.clear();
     renderInk();
   }
 
@@ -789,12 +810,23 @@
      exists only while one of them is on, so it can never sit there quietly
      eating clicks the way the old help overlay did. */
   function syncTools() {
+    // Select is the absence of the other three, so there is no flag of its own
+    // to hold in step — it simply lights up when nothing else is lit.
+    $('#selectBtn').classList.toggle('on', !penOn && !eraseOn && !linking);
     $('#penBtn').classList.toggle('on', penOn);
     $('#eraseBtn').classList.toggle('on', eraseOn);
     viewport.classList.toggle('drawing', penOn);
     viewport.classList.toggle('erasing', eraseOn);
     $('#drawSurface').hidden = !(penOn || eraseOn);
     $('#eraseRing').hidden = !eraseOn;
+  }
+
+  /* Back to the marquee: every other tool off. Nothing to turn ON, because the
+     band is what the canvas does when no mode owns the left button. */
+  function selectTool() {
+    if (penOn) togglePen(false);
+    if (eraseOn) toggleErase(false);
+    if (linking) toggleLink();
   }
 
   function togglePen(force) {
@@ -845,9 +877,11 @@
     });
     if (!hit) return 0;
     state.strokes = keep;
-    if (selectedStroke && !keep.some(function (s) { return s.id === selectedStroke; })) {
-      selectedStroke = null;
-    }
+    // Erasing a selected stroke drops it from the selection; a band selection
+    // makes that likelier than it used to be, so prune the whole set.
+    selStrokes.forEach(function (id) {
+      if (!keep.some(function (s) { return s.id === id; })) selStrokes.delete(id);
+    });
     renderInk();
     return hit;
   }
@@ -937,18 +971,100 @@
 
   // ---------------------------------------------------------------- node ops
 
-  function select(id) {
-    selected = id;
-    selectedEdge = null;
-    var n = nodeById(id);
-    if (n) n.zi = ++zTop;
+  /* ---------------------------------------------------------------- selection
+   *
+   * Four ways in, one way out. Everything that changes what is selected writes
+   * the sets and then calls syncSelection(); nothing anywhere else touches the
+   * `.selected` class or the `sel` class on a stroke or an arrow.
+   *
+   *   claimNode      a press on a node. Shift toggles that node. A plain press
+   *                  on a member of a group leaves the group alone — that is
+   *                  what makes a group draggable from any one of its windows —
+   *                  and a plain press on anything else selects it alone.
+   *   selectOnlyNode one node and nothing else, for code that creates a node or
+   *                  hands one back.
+   *   toggleIn       one stroke or arrow, picked by the viewport handler.
+   *   band           the marquee, which writes all three sets at once.
+   */
+  function selCount() { return selNodes.size + selStrokes.size + selEdges.size; }
+
+  function clearSel() { selNodes.clear(); selStrokes.clear(); selEdges.clear(); }
+
+  function raise(id) { var n = nodeById(id); if (n) n.zi = ++zTop; }
+
+  /* A plain press on a member of a band keeps the whole band — that is what
+     lets a band be dragged by any one of its windows. But a press that turns
+     out to be a CLICK, with no travel, means "just this one", so the collapse
+     is deferred to pointerup and skipped if the pointer went anywhere. Without
+     it, clicking a banded window to read it and then pressing Delete would
+     take all of them. */
+  var pendingCollapse = null;   // { id, x, y }
+
+  function claimNode(id, e) {
+    if (e.shiftKey) {
+      if (selNodes.has(id)) selNodes.delete(id); else selNodes.add(id);
+    } else if (!selNodes.has(id)) {
+      clearSel();
+      selNodes.add(id);
+    } else if (selNodes.size > 1) {
+      pendingCollapse = { id: id, x: e.clientX, y: e.clientY };
+    }
+    raise(id);
+    syncSelection();
+  }
+
+  function selectOnlyNode(id) {
+    clearSel();
+    selNodes.add(id);
+    raise(id);
+    syncSelection();
+  }
+
+  function toggleIn(set, id, additive) {
+    if (additive && set.has(id)) set.delete(id); else set.add(id);
+  }
+
+  /* Pushes the sets at the DOM. Nodes are a class and a z-index each; strokes
+     and arrows carry their state inside SVG that renderInk and renderEdges
+     own. Cheap enough to run per pointermove while a band is being dragged —
+     renderEdges already runs on every frame of a node drag. It is deliberately
+     NOT render(): that would rebuild panes and re-run ensurePane on every
+     frame, and structural sync is not what a selection change needs. */
+  function syncSelection() {
     state.nodes.forEach(function (m) {
       var rec = els.get(m.id);
       if (!rec) return;
-      rec.root.classList.toggle('selected', m.id === id);
+      rec.root.classList.toggle('selected', selNodes.has(m.id));
       rec.root.style.zIndex = focus && focus.id === m.id ? 900 : (m.zi || 1);
       syncScrollbars(rec);
     });
+    renderInk();
+    renderEdges();
+  }
+
+  /* Delete, for every kind at once. One pass and one markDirty, so undo folds
+     a banded delete into a single entry however many things were in it. */
+  function deleteSelection() {
+    if (!selCount()) return;
+    if (selNodes.size) {
+      if (focus && selNodes.has(focus.id)) exitFocus();
+      state.nodes = state.nodes.filter(function (n) { return !selNodes.has(n.id); });
+      // An arrow to a window that just went is an arrow to nothing.
+      state.edges = state.edges.filter(function (e) {
+        return !selNodes.has(e.from) && !selNodes.has(e.to);
+      });
+      if (liveId && selNodes.has(liveId)) liveId = null;
+    }
+    if (selStrokes.size) {
+      state.strokes = state.strokes.filter(function (s) { return !selStrokes.has(s.id); });
+    }
+    if (selEdges.size) {
+      state.edges = state.edges.filter(function (e) { return !selEdges.has(e.id); });
+    }
+    clearSel();
+    render();
+    renderInk();
+    markDirty();
   }
 
   function setLive(id) {
@@ -966,7 +1082,7 @@
     n.zi = ++zTop;
     state.nodes.push(n);
     render();
-    select(n.id);
+    selectOnlyNode(n.id);
     markDirty();
     return n;
   }
@@ -1064,7 +1180,7 @@
     if (focus && focus.id === id) exitFocus();
     state.nodes = state.nodes.filter(function (n) { return n.id !== id; });
     state.edges = state.edges.filter(function (e) { return e.from !== id && e.to !== id; });
-    if (selected === id) selected = null;
+    selNodes.delete(id);
     if (liveId === id) liveId = null;
     render();
     markDirty();
@@ -1072,7 +1188,7 @@
 
   function duplicateNode(id) {
     var n = nodeById(id);
-    if (!n) return;
+    if (!n) return null;
     var copy = JSON.parse(JSON.stringify(n));
     copy.id = uid('n');
     copy.x += 40; copy.y += 40;
@@ -1081,7 +1197,21 @@
       copy.tabs.forEach(function (t) { var old = t.id; t.id = uid('t'); map[old] = t.id; });
       copy.active = map[n.active] || copy.tabs[0].id;
     }
-    addNode(copy);
+    return addNode(copy);
+  }
+
+  /* Ctrl+D over a band copies the lot, and the copies become the selection.
+     addNode selects each new node as it lands, so without the re-selection at
+     the end only the last copy would look duplicated. */
+  function duplicateSelection() {
+    var ids = [];
+    selNodes.forEach(function (id) { ids.push(id); });
+    if (!ids.length) return;
+    var made = [];
+    ids.forEach(function (id) { var c = duplicateNode(id); if (c) made.push(c.id); });
+    clearSel();
+    made.forEach(function (id) { selNodes.add(id); });
+    syncSelection();
   }
 
   // ---------------------------------------------------------------- focus mode
@@ -1122,6 +1252,7 @@
     linking = linking ? null : { from: null };
     $('#linkBtn').classList.toggle('on', !!linking);
     viewport.classList.toggle('linking', !!linking);
+    syncTools();      // Select lights back up when arrow mode ends
     if (!linking) render();
     else toast('Arrow: click the source window, then the target');
   }
@@ -1164,6 +1295,7 @@
 
   function startDrag(e, n, onClick) {
     if (focus) return;
+    if (e.button !== 0) return;   // the right button pans, over a window too
     // Two subtleties, both learned the hard way:
     //  - No preventDefault(): on pointerdown it suppresses the compatibility
     //    mouse events, which kills the dblclick that opens webpage mode.
@@ -1174,29 +1306,49 @@
     //    see the dblclick at all.
     holdSelection();
     var cap = e.currentTarget;
-    var rec = els.get(n.id);
-    var sx = e.clientX, sy = e.clientY, ox = n.x, oy = n.y;
+    var sx = e.clientX, sy = e.clientY;
     var moved = false;
-    rec.root.classList.add('dragging');
+
+    /* Everything selected moves together. The node under the pointer was
+       already claimed by the root's capture-phase handler, which ran before
+       this one, so by now the sets say exactly what should travel: a press on
+       a member of a band left the band intact, and a press on anything else
+       collapsed it to that node alone. The fallback covers the one case that
+       handler leaves out — a shift-press that toggled this node OFF and then
+       dragged it. */
+    var team = [];
+    selNodes.forEach(function (id) {
+      var m = nodeById(id), r = els.get(id);
+      if (m && r) team.push({ n: m, rec: r, ox: m.x, oy: m.y });
+    });
+    if (!selNodes.has(n.id)) team.push({ n: n, rec: els.get(n.id), ox: n.x, oy: n.y });
+    team.forEach(function (t) { t.rec.root.classList.add('dragging'); });
     cap.setPointerCapture(e.pointerId);
-    select(n.id);
 
     function move(ev) {
       // A few pixels of slop, or a click with a shaky hand nudges the node
       // instead of opening it for editing.
       if (Math.abs(ev.clientX - sx) > 3 || Math.abs(ev.clientY - sy) > 3) moved = true;
-      n.x = Math.round(ox + (ev.clientX - sx) / state.camera.z);
-      n.y = Math.round(oy + (ev.clientY - sy) / state.camera.z);
-      rec.root.style.left = n.x + 'px';
-      rec.root.style.top = n.y + 'px';
+      var dx = (ev.clientX - sx) / state.camera.z;
+      var dy = (ev.clientY - sy) / state.camera.z;
+      team.forEach(function (t) {
+        t.n.x = Math.round(t.ox + dx);
+        t.n.y = Math.round(t.oy + dy);
+        t.rec.root.style.left = t.n.x + 'px';
+        t.rec.root.style.top = t.n.y + 'px';
+      });
       renderEdges();
     }
     function up(ev) {
-      rec.root.classList.remove('dragging');
+      team.forEach(function (t) { t.rec.root.classList.remove('dragging'); });
       cap.releasePointerCapture(ev.pointerId);
       cap.removeEventListener('pointermove', move);
       cap.removeEventListener('pointerup', up);
-      if (!moved && onClick) { n.x = ox; n.y = oy; syncNode(n); onClick(); return; }
+      if (!moved && onClick) {
+        team.forEach(function (t) { t.n.x = t.ox; t.n.y = t.oy; syncNode(t.n); });
+        onClick();
+        return;
+      }
       markDirty();
     }
     cap.addEventListener('pointermove', move);
@@ -1205,12 +1357,14 @@
 
   function startResize(e, n, dir) {
     if (focus) return;
+    // Ahead of stopPropagation, so a right-press on a grip still reaches the
+    // viewport and pans. Selection is the root capture handler's job.
+    if (e.button !== 0) return;
     e.preventDefault(); e.stopPropagation();
     var cap = e.currentTarget;  // the grip — see the note in startDrag
     var rec = els.get(n.id);
     var sx = e.clientX, sy = e.clientY, ow = n.w, oh = n.h;
     cap.setPointerCapture(e.pointerId);
-    select(n.id);
 
     // A window needs room for its chrome; a shape or a text box does not, and
     // clamping those to 260x160 makes small annotations impossible.
@@ -1259,6 +1413,12 @@
     cap.addEventListener('pointerup', up);
   }
 
+  /* The right button, from anywhere: empty canvas, a window, a shape, or the
+     pen's own draw surface. It had to give up the left button to the marquee,
+     and the right one turns out to be the better home for it anyway — a board
+     covered edge to edge in documents has no empty canvas left to drag. The
+     one place it cannot reach is a frame that has been woken up: that document
+     swallows the press, and keeps its own context menu with it. */
   function startPan(e) {
     holdSelection();
     var sx = e.clientX, sy = e.clientY;
@@ -1277,6 +1437,125 @@
       viewport.removeEventListener('pointermove', move);
       viewport.removeEventListener('pointerup', up);
       markDirty();
+    }
+    viewport.addEventListener('pointermove', move);
+    viewport.addEventListener('pointerup', up);
+  }
+
+  /* ------------------------------------------------------------- marquee
+   *
+   * The resting tool: no mode to enter and nothing to switch off. A left drag
+   * from empty canvas bands whatever it crosses — windows, ink and arrows
+   * alike. Panning and banding are the same gesture with the same hand, so
+   * only one of them could keep the left button; the pan went right.
+   *
+   * The band is a plain fixed div in SCREEN space, so it needs no camera maths
+   * of its own and the zoom cannot distort it. Only the hit test converts, once
+   * per move, and it runs live rather than on release: a band whose result you
+   * cannot see until you let go is a band you end up drawing twice.
+   *
+   * Intersection, not containment. A window is usually bigger than the gap you
+   * have room to drag in, and demanding the whole thing inside the box makes a
+   * board of full-size documents impossible to select.
+   */
+  function worldRect(ax, ay, bx, by) {
+    var a = screenToWorld(ax, ay), b = screenToWorld(bx, by);
+    return {
+      x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y),
+      x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y),
+    };
+  }
+
+  /* Segment against an axis-aligned rect, by the slab method: clip the
+     segment's parameter range against each of the four edges in turn and see
+     whether any of it survives. A segment lying wholly inside falls out of it
+     for free, so there is no separate containment case. */
+  function segHitsRect(ax, ay, bx, by, r) {
+    var t0 = 0, t1 = 1;
+    var dx = bx - ax, dy = by - ay;
+    var p = [-dx, dx, -dy, dy];
+    var q = [ax - r.x0, r.x1 - ax, ay - r.y0, r.y1 - ay];
+    for (var i = 0; i < 4; i++) {
+      if (p[i] === 0) { if (q[i] < 0) return false; continue; }   // parallel and outside
+      var t = q[i] / p[i];
+      if (p[i] < 0) { if (t > t1) return false; if (t > t0) t0 = t; }
+      else { if (t < t0) return false; if (t < t1) t1 = t; }
+    }
+    return true;
+  }
+
+  /* A stroke is simplified down to as few as two points, so asking whether any
+     of its POINTS is inside the band would miss a long straight line drawn
+     clean through it. Every segment is tested instead, against a rect grown by
+     the stroke's half-width, so a fat mark is as easy to catch as it is to
+     erase. */
+  function strokeInRect(s, r) {
+    var pad = s.size / 2;
+    var g = { x0: r.x0 - pad, y0: r.y0 - pad, x1: r.x1 + pad, y1: r.y1 + pad };
+    var p0 = s.pts[0];
+    if (!p0) return false;
+    if (s.pts.length === 1) {
+      return p0[0] >= g.x0 && p0[0] <= g.x1 && p0[1] >= g.y0 && p0[1] <= g.y1;
+    }
+    for (var i = 1; i < s.pts.length; i++) {
+      if (segHitsRect(s.pts[i - 1][0], s.pts[i - 1][1], s.pts[i][0], s.pts[i][1], g)) return true;
+    }
+    return false;
+  }
+
+  function band(r, base) {
+    clearSel();
+    base.n.forEach(function (id) { selNodes.add(id); });
+    base.s.forEach(function (id) { selStrokes.add(id); });
+    base.e.forEach(function (id) { selEdges.add(id); });
+    state.nodes.forEach(function (n) {
+      if (n.x < r.x1 && n.x + n.w > r.x0 && n.y < r.y1 && n.y + n.h > r.y0) selNodes.add(n.id);
+    });
+    state.strokes.forEach(function (s) {
+      if (strokeInRect(s, r)) selStrokes.add(s.id);
+    });
+    state.edges.forEach(function (ed) {
+      var seg = edgeSeg(ed);
+      if (seg && segHitsRect(seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y, r)) selEdges.add(ed.id);
+    });
+    syncSelection();
+  }
+
+  function startMarquee(e) {
+    holdSelection();
+    var box = $('#marquee');
+    var x0 = e.clientX, y0 = e.clientY;
+    /* Shift adds to what is already selected; a plain drag replaces it. Copied
+       up front so every move re-derives from the same starting point, rather
+       than accumulating everything the band has ever swept over on its way. */
+    var base = e.shiftKey
+      ? { n: new Set(selNodes), s: new Set(selStrokes), e: new Set(selEdges) }
+      : { n: new Set(), s: new Set(), e: new Set() };
+
+    viewport.setPointerCapture(e.pointerId);
+    box.hidden = false;
+    place(x0, y0);
+
+    function place(x, y) {
+      box.style.left = Math.min(x0, x) + 'px';
+      box.style.top = Math.min(y0, y) + 'px';
+      box.style.width = Math.abs(x - x0) + 'px';
+      box.style.height = Math.abs(y - y0) + 'px';
+    }
+
+    function move(ev) {
+      place(ev.clientX, ev.clientY);
+      band(worldRect(x0, y0, ev.clientX, ev.clientY), base);
+    }
+    function up(ev) {
+      box.hidden = true;
+      viewport.releasePointerCapture(ev.pointerId);
+      viewport.removeEventListener('pointermove', move);
+      viewport.removeEventListener('pointerup', up);
+      // A press that never travelled is a click on empty canvas, and a click on
+      // empty canvas clears — which is exactly what banding a zero-size rect
+      // does, since base is empty unless Shift was held.
+      band(worldRect(x0, y0, ev.clientX, ev.clientY), base);
     }
     viewport.addEventListener('pointermove', move);
     viewport.addEventListener('pointerup', up);
@@ -1688,7 +1967,7 @@
     state.strokes = d.strokes || [];
     state.roots = d.roots || [];
     state.open = d.open || {};
-    selected = null; selectedEdge = null; selectedStroke = null;
+    clearSel();
     if (focus && !nodeById(focus.id)) focus = null;
     if (liveId && !nodeById(liveId)) liveId = null;
     state.nodes.forEach(function (n) { if (!n.zi) n.zi = ++zTop; });
@@ -1786,7 +2065,7 @@
     state.roots = data.roots || [];
     state.open = data.open || {};
     state.nodes.forEach(function (n) { n.zi = ++zTop; });
-    selected = null; liveId = null; selectedEdge = null;
+    clearSel(); liveId = null;
     els.forEach(function (rec) { rec.root.remove(); });
     els.clear();
     dirCache.clear();          // a different board may show different folders
@@ -1859,7 +2138,7 @@
       if (eraseOn) return toggleErase(false);
       if (linking) return toggleLink();
       if (panelOpen()) { setRailView('files'); return; }
-      selected = null; selectedEdge = null; setLive(null); render();
+      clearSel(); setLive(null); syncSelection();
       return;
     }
     if (typing) return;
@@ -1873,25 +2152,18 @@
                 (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveToDisk(); return; }
     if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleRail(); return; }
-    if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); if (selected) duplicateNode(selected); return; }
+    if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelection(); return; }
     if (mod) return;
 
     switch (e.key) {
       case 'f': case 'F': fitAll(); break;
+      case 'v': case 'V': selectTool(); break;
       case 'l': case 'L': toggleLink(); break;
       case 'p': case 'P': togglePen(); break;
       case 'e': case 'E': toggleErase(); break;
       case '0': fly(function () { state.camera.z = 1; }); markDirty(); break;
       case '?': showHelp(true); break;
-      case 'Delete': case 'Backspace':
-        if (selectedStroke) {
-          state.strokes = state.strokes.filter(function (x) { return x.id !== selectedStroke; });
-          selectedStroke = null; renderInk(); markDirty();
-        } else if (selectedEdge) {
-          state.edges = state.edges.filter(function (x) { return x.id !== selectedEdge; });
-          selectedEdge = null; render(); markDirty();
-        } else if (selected) removeNode(selected);
-        break;
+      case 'Delete': case 'Backspace': deleteSelection(); break;
     }
   }
 
@@ -1902,6 +2174,7 @@
       switch (b.dataset.act) {
         case 'save': saveToDisk(); break;
         case 'fit': fitAll(); break;
+        case 'select': selectTool(); break;
         case 'link': toggleLink(); break;
         case 'undo': undo(); break;
         case 'redo': redo(); break;
@@ -2091,30 +2364,36 @@
 
     viewport.addEventListener('wheel', onWheel, { passive: false });
     viewport.addEventListener('pointerdown', function (e) {
+      /* The right button pans, and it pans from anywhere — including from on
+         top of a window, which is half the reason for moving it off the left
+         one: a board covered in documents has no empty canvas left to drag.
+         Hence ahead of the .node test rather than after it. */
+      if (e.button === 2) { startPan(e); return; }
+      if (e.button !== 0) return;
       if (e.target.closest('.node')) return;
       if (linking) { toggleLink(); return; }
 
-      /* Strokes and arrows are picked here, on pointerdown, because startPan
-         is about to capture the pointer and a captured pointer retargets the
-         click away from them (invariant 3). Selecting one also means not
-         panning — dragging from a stroke should not slide the canvas. */
+      /* Strokes and arrows are picked here, on pointerdown, because the
+         marquee is about to capture the pointer and a captured pointer
+         retargets the click away from them (invariant 3). Picking one also
+         means not banding — a drag that starts on a stroke should not
+         rubber-band the canvas behind it. */
       var pickStroke = e.target.getAttribute && e.target.getAttribute('data-stroke');
       var pickEdge = e.target.getAttribute && e.target.getAttribute('data-edge');
       if (pickStroke || pickEdge) {
-        selected = null;
-        selectedStroke = pickStroke || null;
-        selectedEdge = pickEdge || null;
+        if (!e.shiftKey) clearSel();
+        if (pickStroke) toggleIn(selStrokes, pickStroke, e.shiftKey);
+        if (pickEdge) toggleIn(selEdges, pickEdge, e.shiftKey);
         setLive(null);
-        render();
-        renderInk();
+        syncSelection();
         return;
       }
 
-      selected = null; selectedEdge = null; selectedStroke = null;
+      /* Clearing happens on the way down, not on release, so the board answers
+         the press immediately. Shift keeps what is there and adds to it. */
       setLive(null);
-      render();
-      renderInk();
-      startPan(e);
+      if (!e.shiftKey) { clearSel(); syncSelection(); }
+      startMarquee(e);
     });
     viewport.addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
     viewport.addEventListener('drop', function (e) {
@@ -2155,6 +2434,10 @@
     // empty canvas. It exists only while the mode is on.
     var surf = $('#drawSurface');
     surf.addEventListener('pointerdown', function (e) {
+      // The tool keeps the left button; the right one still pans, so the canvas
+      // can be moved without putting the pen down first.
+      if (e.button === 2) return startPan(e);
+      if (e.button !== 0) return;
       if (penOn) return startStroke(e);
       if (eraseOn) return startErase(e);
     });
@@ -2168,8 +2451,29 @@
     document.addEventListener('selectstart', function (e) {
       if (noSelect) e.preventDefault();
     });
-    window.addEventListener('pointerup', function () { noSelect = false; }, true);
-    window.addEventListener('pointercancel', function () { noSelect = false; }, true);
+
+    /* Right-drag is the pan, and Windows raises the context menu on the button
+       coming back UP — that is, at the end of every single pan. Suppressed over
+       the canvas and the draw surface only: the rail, the note editors and any
+       woken frame keep their menus. (A frame's own contextmenu never leaves the
+       frame, so there is nothing to suppress there even if we wanted to.) */
+    viewport.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    surf.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    window.addEventListener('pointerup', function (e) {
+      noSelect = false;
+      // See claimNode: a press on a banded window collapses the band only if
+      // it never became a drag. Capture phase, so it settles before the
+      // gesture's own pointerup handlers read the selection.
+      if (pendingCollapse) {
+        var p = pendingCollapse;
+        pendingCollapse = null;
+        if (Math.abs(e.clientX - p.x) < 4 && Math.abs(e.clientY - p.y) < 4) selectOnlyNode(p.id);
+      }
+    }, true);
+    window.addEventListener('pointercancel', function () {
+      noSelect = false;
+      pendingCollapse = null;
+    }, true);
 
     window.addEventListener('keydown', onKey);
     window.addEventListener('resize', function () {
@@ -2182,6 +2486,7 @@
     window.addEventListener('beforeunload', function () { Shell.draftSet(boardName, serialize()); });
 
     wireTopbar();
+    syncTools();      // lights Select, which is what a fresh board is in
     applyCamera();
 
     // Needed before any board loads: it seeds new boards and is the root a

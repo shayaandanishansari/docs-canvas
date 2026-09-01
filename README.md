@@ -34,7 +34,7 @@ the whole window. The **burger in the top-left corner** is always there; click i
 (or `Ctrl+B`) to slide the sidebar in and out.
 
 Inside it, top to bottom: the board name, undo/redo, **Save / Save as / Open /
-Fit**, the **Arrow / Pen / colour / Erase** markup tools, the **Add** row, and
+Fit**, the **Select / Arrow / Pen / colour / Erase** tools, the **Add** row, and
 then the folder tree. The tools stay put when the sidebar switches to the
 Shortcuts or Boards view, so nothing has to be dismissed to reach the pen.
 
@@ -53,6 +53,26 @@ Windows folder picker, and that folder becomes a branch you can expand.
   list. **All files** additionally shows files the canvas can't display, greyed
   out, so the tree looks like the real folder.
 - The search box searches every folder on the board, not just what's expanded.
+
+## Selecting and moving around
+
+- **Drag a box on the canvas to select.** That is what a drag does by default —
+  there is no tool to pick first — and it takes everything the box touches,
+  windows and notes and pen marks and arrows alike. It only has to *touch*
+  something, not swallow it whole, so a small box drawn in a gap still catches
+  the big documents around it.
+- **Drag any one of them to move all of them.** Delete removes the lot, Ctrl+D
+  copies the lot. One Ctrl+Z puts it all back.
+- **Hold shift** while dragging a box, or while clicking, to add to what is
+  already selected — or to drop something back out of it.
+- **Click one of a selected group** to narrow back down to just that one.
+- **Hold the right mouse button to pan.** Anywhere: over empty canvas, or
+  straight over a document, which matters once a board is full enough that there
+  is no empty canvas left. Scrolling pans too, and Ctrl+scroll zooms to the
+  cursor. (The one spot the right button won't pan from is a page you have
+  clicked into — that page is awake and gets its own right-click menu.)
+- **Esc, or `V`,** puts the pen or the eraser down and hands the canvas back to
+  the selection box.
 
 ## Using it
 
@@ -82,7 +102,8 @@ Windows folder picker, and that folder becomes a branch you can expand.
 - **Pen** (`P`) draws freehand, in any colour from the picker beside it —
   including straight over a document, which is the point. **Eraser** (`E`) drags
   across strokes to remove them. Esc leaves either mode.
-- **Click a stroke or an arrow** to select it, then Del to remove it.
+- **Click a stroke or an arrow** to select it, then Del to remove it — or catch a
+  handful of them in a selection box and take them all at once.
 - **Text, rectangle, ellipse, line, arrow** from the Add row in the sidebar's
   tools. Shapes are dragged by their outline, so an empty rectangle drawn around
   a window doesn't block the window.
@@ -147,7 +168,10 @@ without, every one of which is there because it already went wrong once.
 
 - Live frames render at every zoom level. Fine for the ~10-window boards this is
   built for; a 40-window board would want static cards below ~35% zoom.
-- One thing selected at a time — no marquee, no groups.
+- A selection is not a group: it moves and deletes together, then it is
+  forgotten. Nothing is saved as a named group, and there is no select-all.
+- Dragging a corner of one selected window resizes only that window, not the
+  whole selection.
 - A window dragged under the burger can't be clicked in that one corner.
 - The eraser removes whole strokes, not parts of one.
 

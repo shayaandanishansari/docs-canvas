@@ -83,7 +83,10 @@ async function openRail(page) {
   check('clicking a stroke selects it',
         await page.$$eval('#ink g.stroke.sel', n => n.length) === 1);
 
-  // Selecting must not also pan the canvas
+  /* A drag that starts on a stroke belongs to neither of the canvas
+     gestures: it must not pan (it never could — the left button bands now)
+     and it must not band either, or picking a stroke would immediately
+     rubber-band away the pick you just made. */
   const camA = await page.evaluate(() => document.querySelector('#world').style.transform);
   await page.mouse.move(mid.x, mid.y);
   await page.mouse.down();
@@ -92,6 +95,8 @@ async function openRail(page) {
   await page.waitForTimeout(250);
   const camB = await page.evaluate(() => document.querySelector('#world').style.transform);
   check('dragging from a stroke does not pan the canvas', camA === camB, camA + ' / ' + camB);
+  check('and it does not start a selection band either',
+        await page.$$eval('#ink g.stroke.sel', n => n.length) === 1);
 
   await page.keyboard.press('Delete');
   await page.waitForTimeout(300);

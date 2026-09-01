@@ -57,7 +57,9 @@ input:focus { border-color: var(--accent); }
   background-color: var(--bg);
   background-image: radial-gradient(var(--grid) 1px, transparent 1px);
   background-size: 26px 26px;
-  cursor: grab;
+  /* An arrow, not a grab hand: the left button bands a selection now, and only
+     the right one pans. A grab cursor would be advertising the wrong gesture. */
+  cursor: default;
   overscroll-behavior: none;
 }
 #viewport.panning { cursor: grabbing; }
@@ -132,6 +134,18 @@ input:focus { border-color: var(--accent); }
   box-shadow: 0 0 0 1px rgba(0,0,0,.45);
 }
 #eraseRing[hidden] { display: none; }   /* invariant 4 */
+
+/* The selection band. Fixed, so it is drawn in screen pixels and the camera
+   never touches it — a 1px border stays 1px at 8% zoom and at 250%. Below the
+   draw surface (30) and the rail (40); it must never take a pointer event of
+   its own, since the pointer is captured by the viewport for the whole drag. */
+#marquee {
+  position: fixed; z-index: 25; pointer-events: none;
+  border: 1px solid var(--accent);
+  background: rgba(91,140,255,.13);
+  border-radius: 2px;
+}
+#marquee[hidden] { display: none; }   /* invariant 4 */
 
 #undoBtn svg, #redoBtn svg {
   display: block; width: 13px; height: 13px;

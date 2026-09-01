@@ -1,11 +1,15 @@
 /*
- * Panning is not a text selection.
+ * No canvas gesture is a text selection.
  *
  * pointerdown cannot be preventDefault()ed (invariant 2), so nothing stops the
- * browser starting a native selection under a canvas gesture: drag the empty
- * canvas across a note and its words come up blue, and the growing selection
- * then fights the pan for the pointer. app.js cancels selectstart for the life
- * of a gesture instead; this suite holds that line.
+ * browser starting a native selection under a canvas gesture: sweep across a
+ * note and its words come up blue, and the growing selection then fights the
+ * gesture for the pointer. app.js cancels selectstart for the life of a gesture
+ * instead; this suite holds that line for all four of them — the band, the pan,
+ * the pen and the eraser.
+ *
+ * Panning is the RIGHT button here. The left one bands a selection, and it has
+ * to be just as free of stray highlighting as the pan ever was.
  *
  * Everything is driven with page.mouse, because a dispatched event would never
  * make the browser attempt a selection in the first place — which is the whole
@@ -41,16 +45,19 @@ const worldXform = (page) =>
 
 /* Returns the selection as it stood mid-drag: a selection that exists only
    while the button is down is still the bug, and releasing can collapse it. */
-async function dragFrom(page, x0, y0, dx, dy) {
+async function dragFrom(page, x0, y0, dx, dy, button) {
+  const btn = button ? { button } : undefined;
   await page.mouse.move(x0, y0);
-  await page.mouse.down();
+  await page.mouse.down(btn);
   for (let i = 1; i <= 12; i++) {
     await page.mouse.move(x0 + (dx * i) / 12, y0 + (dy * i) / 12, { steps: 2 });
   }
   const during = await selection(page);
-  await page.mouse.up();
+  await page.mouse.up(btn);
   return during;
 }
+
+const panFrom = (page, x0, y0, dx, dy) => dragFrom(page, x0, y0, dx, dy, 'right');
 
 (async () => {
   // Notes sit right in the path of a drag that starts on empty canvas: their
@@ -81,7 +88,7 @@ async function dragFrom(page, x0, y0, dx, dy) {
    * where the next drag does not try to select at all — which quietly hid
    * this bug from a suite that checked note editing first. */
   const before = await worldXform(page);
-  let sel = await dragFrom(page, 200, 80, 600, 600);   // sweeps across n1
+  let sel = await panFrom(page, 200, 80, 600, 600);   // sweeps across n1
   const after = await worldXform(page);
   check('a pan across a note selects nothing', sel === '', JSON.stringify(sel));
   check('and the pan itself still moved the camera', before !== after);
@@ -89,13 +96,30 @@ async function dragFrom(page, x0, y0, dx, dy) {
   // A second pan is the half of the bug that felt like the canvas snagging:
   // with a live selection in play the next drag fought it for the pointer.
   const mid = after;
-  sel = await dragFrom(page, 200, 80, 500, 300);
+  sel = await panFrom(page, 200, 80, 500, 300);
   check('a second pan selects nothing either', sel === '', JSON.stringify(sel));
   check('and it still pans', mid !== (await worldXform(page)));
 
+  /* Windows raises the context menu on the right button coming back UP —
+     that is, at the end of every pan — and a menu left standing over the
+     canvas would eat the next gesture. A third pan immediately after the
+     second is what proves it was suppressed. */
+  const beforeCtx = await worldXform(page);
+  await panFrom(page, 300, 200, 120, 90);
+  check('a pan still works right after one ended on a right-button release',
+        beforeCtx !== (await worldXform(page)));
+
   // ------------------------------------------------------- other gestures
-  sel = await dragFrom(page, 120, 780, 700, -300);
+  sel = await panFrom(page, 120, 780, 700, -300);
   check('a pan sweeping the text box selects nothing', sel === '', JSON.stringify(sel));
+
+  /* The band is the left button's gesture and sweeps the same notes. It is
+     the one most likely to regress: it is the default, so it is what a
+     mis-aimed drag does now. */
+  const camBand = await worldXform(page);
+  sel = await dragFrom(page, 200, 80, 600, 600);
+  check('a band across a note selects no text', sel === '', JSON.stringify(sel));
+  check('and banding does not pan the camera', camBand === (await worldXform(page)));
 
   await openRail(page);
   await page.click('[data-act="pen"]');

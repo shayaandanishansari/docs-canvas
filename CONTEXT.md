@@ -183,7 +183,7 @@ dblclick-to-focus.
 | `els` | `Map<nodeId, { root, tabsEl, bodyEl, shield, focusBtn, panes:Map }>` — DOM cache |
 | `inkEls` | `Map<strokeId, <g>>` — the ink layer's DOM cache |
 | `dirCache` | `Map<'rootId::dir', listing>` so reopening a folder is instant |
-| `selected` / `selectedEdge` / `selectedStroke` | current selection (one at a time, by design) |
+| `selNodes` / `selStrokes` / `selEdges` | the selection, one `Set` of ids per kind — see Selection |
 | `liveId` | the one node whose frame currently accepts pointer events |
 | `focus` | `null`, or `{ id, geom, cam }` saved for restore on Esc |
 | `linking` / `penOn` / `eraseOn` | the three modes; mutually exclusive |
@@ -246,15 +246,32 @@ stroke time, so drawing at 25% and at 250% both lay down the same screen width.
 
 | surface | handler | does |
 |---|---|---|
-| `#viewport` empty space | pointerdown | pick a stroke/arrow, else deselect + `startPan` |
+| anywhere on the canvas | pointerdown, **button 2** | `startPan` — taken first, before every row below |
+| `#viewport` empty space | pointerdown | pick a stroke/arrow, else deselect + `startMarquee` |
 | `#viewport` | wheel | Ctrl/Cmd → `zoomAt`; otherwise pan. Non-passive listener |
+| `#viewport`, `#drawSurface` | contextmenu | `preventDefault` — the pan ends on a right-button release |
 | `#drawSurface` | pointerdown | `startStroke` or `startErase` |
 | `.shield` | click | wake that node (`setLive`) |
 | `.chrome` | pointerdown | `startDrag`, unless the target is a button or `.tab` |
 | `.chrome` | dblclick | `enterFocus` / `exitFocus` |
-| `.node` root | pointerdown **capture** | link mode interception, else `select` |
+| `.node` root | pointerdown **capture** | link mode interception, else `claimNode` |
 | `.node.type-shape .body` | pointerdown | `startDrag` — a shape is dragged by its ink |
 | `.grip` | pointerdown | `startResize` |
+
+**The left button selects and the right button pans.** A left drag from empty
+canvas is a marquee, and it is the canvas's resting state: there is no mode to
+enter and nothing to switch off, so it is what a mis-aimed drag does. That left
+the pan nowhere to go but the right button — which turned out to be the better
+home for it, because a right-drag pans from *anywhere*, including from on top of
+a window. A board covered edge to edge in documents has no empty canvas left to
+drag, and used to be unpannable except by the wheel.
+
+Two costs, both paid explicitly. Windows raises the context menu on the right
+button coming back **up** — that is, at the end of every pan — so `contextmenu`
+is cancelled over the canvas and the draw surface (and nowhere else: the rail,
+the note editors and any woken frame keep their menus). And a frame that has
+been woken swallows the press entirely, so the one place the pan cannot reach is
+a live document — it keeps its own menu too.
 
 Frames are **shielded by default** — a transparent overlay over every iframe —
 so dragging a window isn't swallowed by the page inside it. One click wakes a
@@ -269,7 +286,52 @@ survives the round trip.
 handler ignores anything over a `.node` — without a surface of its own, neither
 pen nor eraser could reach a window, which is the main thing anyone wants to
 draw on. It is present **only while a tool is active**, which is what stops it
-being the click-eating overlay of invariant 4.
+being the click-eating overlay of invariant 4. The right button reaches through
+it to `startPan`, so the canvas can be moved without putting the pen down.
+
+---
+
+## Selection
+
+Three `Set`s of ids — `selNodes`, `selStrokes`, `selEdges` — not three slots.
+Everything that changes them writes the sets and then calls `syncSelection()`;
+nothing anywhere else touches a `.selected` class or an SVG `sel` class. There
+are exactly four ways in:
+
+| | when | behaviour |
+|---|---|---|
+| `claimNode(id, e)` | a press on a node | Shift toggles it. A plain press on a member of a band leaves the band alone; on anything else it selects that node alone |
+| `selectOnlyNode(id)` | a node is created, or handed back by an editor | one node, nothing else |
+| `toggleIn(set, id, additive)` | the viewport picks a stroke or arrow | Shift adds, otherwise replaces |
+| `band(rect, base)` | the marquee, per pointermove | `base` ∪ everything the rect touches |
+
+`syncSelection()` is deliberately **not** `render()`: a selection change is not a
+structural change, and running `ensurePane` on every frame of a band would be
+both wasteful and a good way to trip invariant 1. It writes the node classes and
+z-indexes directly, then leans on `renderInk()` and `renderEdges()`, which the
+drag path already runs per move.
+
+**The marquee.** A plain fixed `div` (`#marquee`) in **screen** space, so it
+needs no camera maths of its own and the zoom cannot distort its 1px border.
+Only the hit test converts, once per move via `worldRect()`, and it runs live
+rather than on release — a band whose result you cannot see until you let go is
+a band you end up drawing twice.
+
+Hits are by **intersection, not containment**. A window is usually bigger than
+the gap you have room to drag in, and demanding the whole thing inside the box
+makes a board of full-size documents impossible to select. Nodes are a rect
+overlap; arrows and ink go through `segHitsRect()`, a Liang–Barsky slab clip.
+Ink is tested **segment by segment**, against the rect grown by the stroke's
+half-width: RDP simplification can leave a straight stroke as two points
+hundreds of pixels apart, so a point-in-rect test would miss a line drawn clean
+through the band. Suite `09-marquee.js` pins that exact case.
+
+**Collapse on click.** A plain press on one window of a band keeps the whole
+band — that is what lets a band be dragged by any one of its members. But a
+press that never travels means "just this one", so `claimNode` arms
+`pendingCollapse` and a capture-phase `pointerup` on `window` collapses if the
+pointer stayed put. Without it, clicking a banded window to read it and then
+pressing Delete would take all of them.
 
 ---
 
@@ -390,6 +452,15 @@ inside. `shell.js` injects a stylesheet into each same-origin frame on every
 `<html>` — it asks the DOM the *same* selector the CSS asks, so the two cannot
 drift. Cross-origin web nodes throw, are caught, and keep their own scrollbar.
 
+**10. Every gesture handler inside `#world` must bail on a non-left button.**
+`if (e.button !== 0) return;` is the first line of `startDrag`, `startResize`,
+the `.node` root capture handler and the `#drawSurface` handler. The right
+button is the pan and it has to work over a window, which means the press lands
+on that window's own handlers first and has to fall through them — so the guard
+goes **before** any `stopPropagation()`, or the pan dies wherever a node is
+under the pointer. A new handler that forgets it will drag a window sideways
+while the user thinks they are panning.
+
 ---
 
 ## The Shell boundary
@@ -463,6 +534,12 @@ embeds nodes wholesale so new fields round-trip for free.
 `style.css`, a `createEmbed` case if it isn't frame-renderable, and optionally a
 `defaultSize` entry.
 
+**Change what a gesture does.** Read invariant 10 first, then the Selection
+section. The left button is spoken for by the marquee and the right one by the
+pan, so a new drag gesture wants a modifier or a mode, not a third button —
+middle-click is a browser autoscroll on Windows and buttons 3 and 4 are Back and
+Forward. Whatever it is, it calls `holdSelection()` first (invariant 2).
+
 **Add a toolbar action.** Put `data-act="thing"` on the button in `index.html`
 — it belongs in `#tools` in the rail; there is no floating bar any more — and a
 case in the `wireTopbar` delegated click handler. The listener is on `document`,
@@ -512,6 +589,11 @@ Rules the suites encode, all learned the hard way:
   `reload` — otherwise a click on `[data-act=…]` fails as "element is outside of
   the viewport" rather than as a missing button.
 - Shapes are grabbed by their ink, not a chrome bar.
+- **A pan is `page.mouse.down({ button: 'right' })`.** A plain `down()` on empty
+  canvas draws a selection band and moves the camera not at all. Suites that
+  pan and then use fixed coordinates have to account for the camera afterwards
+  — `09-marquee.js` does its banding before it does any panning for exactly
+  that reason, and takes a live `boundingBox()` when it needs one after.
 - **Drive with `page.mouse`, never `dispatchEvent`.** A dispatched click bypasses
   hit-testing and pointer capture. That is exactly how "clicking a stroke selects
   it" passed against code where it did nothing at all.
@@ -530,8 +612,14 @@ look at it.
 - **Live frames at every zoom.** Fine for the ~10-window boards this targets. A
   40-window board would want frames swapped for static cards below ~35% zoom and
   rehydrated on the way in. Harder than it sounds — it interacts with invariant 1.
-- **Single selection.** No marquee, no groups. Adding it roughly doubles the
-  input-handling code.
+- **No named groups.** A band is a selection, not a thing on the board: it
+  moves and deletes together and is then forgotten. Persisting one means a new
+  top-level board key and a decision about what a group does to z-order.
+- **A band cannot be resized as a whole,** and a grip on a banded node resizes
+  only that node. Group resize needs a bounding box with grips of its own and a
+  scale factor applied per node, which shapes and text boxes each answer
+  differently (`n.fs`, not `n.w`).
+- **No select-all,** and no way to band what is off screen — Fit first.
 - **A window dragged under the burger** can't be clicked in that one corner. It
   is 32x30px in the top-left, and the only chrome that floats over the canvas.
 - **The eraser takes whole strokes.** Partial rub-out means splitting a stroke's

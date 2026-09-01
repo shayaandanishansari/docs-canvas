@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Read first
 
 `CONTEXT.md` is the authoritative guide for changing this codebase — file map, server
-endpoints, board schema, rendering model, event routing, undo, the nine invariants, and
+endpoints, board schema, rendering model, event routing, undo, the ten invariants, and
 per-task recipes. Read the relevant section before editing; this file is only the
 orientation on top of it. `README.md` is the user-facing doc.
 
@@ -58,7 +58,7 @@ window still pointing into it.
 
 ## Rules that bite
 
-All nine invariants are in `CONTEXT.md`; these are the ones most likely to be tripped by a
+All ten invariants are in `CONTEXT.md`; these are the ones most likely to be tripped by a
 routine-looking change:
 
 1. **Never reorder `.node` elements in the DOM.** Moving an `<iframe>` reloads it, losing
@@ -76,11 +76,19 @@ routine-looking change:
    and `--ez` is an inline style on each SVG, not inherited.
 6. **`app.js` never calls `fetch`, constructs an `<iframe>`, or touches `localStorage`** —
    it all goes through `Shell`.
+7. **The left button selects, the right button pans.** A left drag on empty canvas is a
+   marquee — the canvas's resting tool, with no mode to enter. So every gesture handler
+   inside `#world` starts with `if (e.button !== 0) return;`, *before* any
+   `stopPropagation()`, or a right-drag over a window drags the window instead of panning.
 
 Two update paths, kept separate on purpose: `render()` for structural sync, direct
 `style.left/top/width/height` writes during drag and resize (never `render()` in a
 pointermove path). Ink is rebuilt incrementally by `renderInk()` — do not give it the
 wholesale `renderEdges()` treatment.
+
+Selection is three `Set`s (`selNodes` / `selStrokes` / `selEdges`) and one writer,
+`syncSelection()` — which is a third path again, and deliberately not `render()`. See the
+Selection section of `CONTEXT.md` before touching a `.selected` class.
 
 A new top-level board key does not round-trip on its own: add it to both `serialize()` and
 `adopt()`.
@@ -89,11 +97,12 @@ A new top-level board key does not round-trip on its own: add it to both `serial
 
 Every bug found while building this was an interaction bug invisible to reading the source,
 so verify in a real browser. The suites encode the rules that were learned the hard way —
-drive with `page.mouse` and never `dispatchEvent`, call the suite's idempotent
-`openRail(page)` after each `goto`/`reload` because the sidebar starts shut, seed
-`boards/default.json` empty rather than deleting it, assert an image's `naturalWidth`, and
-assert zero `console`/`pageerror` at the end. See the Verifying changes section of
-`CONTEXT.md` before writing a new suite.
+drive with `page.mouse` and never `dispatchEvent`, pan with
+`page.mouse.down({ button: 'right' })` because a plain drag now bands a selection, call the
+suite's idempotent `openRail(page)` after each `goto`/`reload` because the sidebar starts
+shut, seed `boards/default.json` empty rather than deleting it, assert an image's
+`naturalWidth`, and assert zero `console`/`pageerror` at the end. See the Verifying changes
+section of `CONTEXT.md` before writing a new suite.
 
 A green suite is not proof the UI looks right — take a screenshot and look at it.
 

@@ -161,11 +161,13 @@ async function openRail(page) {
         await page.evaluate(() => !document.querySelector('#viewport').classList.contains('drawing')));
 
   const camBefore = await page.evaluate(() => document.querySelector('#world').style.transform);
-  await page.mouse.move(700, 700); await page.mouse.down();
-  await page.mouse.move(760, 740, { steps: 5 }); await page.mouse.up();
+  // Right button: the left one bands a selection now, at every zoom and
+  // in every mode.
+  await page.mouse.move(700, 700); await page.mouse.down({ button: 'right' });
+  await page.mouse.move(760, 740, { steps: 5 }); await page.mouse.up({ button: 'right' });
   await page.waitForTimeout(300);
   const camAfter = await page.evaluate(() => document.querySelector('#world').style.transform);
-  check('dragging empty canvas pans again once the pen is off', camBefore !== camAfter);
+  check('right-dragging the canvas pans again once the pen is off', camBefore !== camAfter);
 
   // ---- annotating a document, which is the whole point of the pen
   console.log('\n[drawing over a document]');
@@ -284,9 +286,9 @@ async function openRail(page) {
     const a = await page.evaluate(() =>
       document.querySelector('#ink path.body').getBoundingClientRect().x);
     await page.mouse.move(1000, 800);
-    await page.mouse.down();
+    await page.mouse.down({ button: 'right' });
     await page.mouse.move(1120, 880, { steps: 8 });    // real pan drag
-    await page.mouse.up();
+    await page.mouse.up({ button: 'right' });
     await page.waitForTimeout(300);
     const b = await page.evaluate(() =>
       document.querySelector('#ink path.body').getBoundingClientRect().x);

@@ -180,8 +180,8 @@ async function openRail(page) {
   console.log('\n[camera is not undoable]');
   const depth = await page.evaluate(() => document.querySelector('#undoBtn').disabled);
   const camBefore = await page.evaluate(() => document.querySelector('#world').style.transform);
-  await page.mouse.move(1300, 300); await page.mouse.down();
-  await page.mouse.move(1380, 380, { steps: 6 }); await page.mouse.up();
+  await page.mouse.move(1300, 300); await page.mouse.down({ button: 'right' });
+  await page.mouse.move(1380, 380, { steps: 6 }); await page.mouse.up({ button: 'right' });
   await page.waitForTimeout(700);
   const n0 = await nodes(page);
   await page.keyboard.press('Control+z');

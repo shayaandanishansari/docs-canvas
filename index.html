@@ -54,7 +54,10 @@
       <button data-act="fit" title="Fit everything (F)">Fit</button>
     </div>
 
+    <!-- Select is the resting tool and is lit whenever none of the others is:
+         it turns things off rather than on. -->
     <div class="t-row">
+      <button data-act="select" id="selectBtn" class="on" title="Select — drag a box on empty canvas (V)">Select</button>
       <button data-act="link" id="linkBtn" title="Draw an arrow (L)">Arrow</button>
       <button data-act="pen" id="penBtn" title="Freehand pen (P)">Pen</button>
       <input type="color" id="penColor" value="#ffd166" title="Pen colour">
@@ -95,7 +98,9 @@
 
   <div id="shortcuts">
     <div class="sc-grp">Canvas</div>
-    <div class="sc"><span class="d">Pan the canvas</span><kbd>drag empty space</kbd></div>
+    <div class="sc"><span class="d">Select — drag a box over anything</span><kbd>drag empty space</kbd></div>
+    <div class="sc"><span class="d">Add to or drop from the selection</span><kbd>shift</kbd><kbd>drag / click</kbd></div>
+    <div class="sc"><span class="d">Pan the canvas — works over windows too</span><kbd>right-drag</kbd></div>
     <div class="sc"><span class="d">Pan</span><kbd>scroll</kbd></div>
     <div class="sc"><span class="d">Zoom to cursor</span><kbd>ctrl</kbd><kbd>scroll</kbd></div>
     <div class="sc"><span class="d">Fit everything</span><kbd>F</kbd></div>
@@ -104,6 +109,7 @@
     <div class="sc"><span class="d">Redo</span><kbd>ctrl</kbd><kbd>Y</kbd></div>
 
     <div class="sc-grp">Marking up</div>
+    <div class="sc"><span class="d">Back to the selection tool</span><kbd>V</kbd></div>
     <div class="sc"><span class="d">Pen — draws over documents too</span><kbd>P</kbd></div>
     <div class="sc"><span class="d">Eraser — drag across strokes</span><kbd>E</kbd></div>
     <div class="sc"><span class="d">Arrow mode — click source, then target</span><kbd>L</kbd></div>
@@ -116,8 +122,8 @@
     <div class="sc"><span class="d">Wake a frame up, then it scrolls and clicks like a real page</span><kbd>click</kbd></div>
     <div class="sc"><span class="d">Webpage mode — full screen, real reflow</span><kbd>dbl-click title</kbd></div>
     <div class="sc"><span class="d">Leave webpage mode / cancel</span><kbd>esc</kbd></div>
-    <div class="sc"><span class="d">Remove what's selected</span><kbd>del</kbd></div>
-    <div class="sc"><span class="d">Duplicate selected node</span><kbd>ctrl</kbd><kbd>D</kbd></div>
+    <div class="sc"><span class="d">Remove everything selected</span><kbd>del</kbd></div>
+    <div class="sc"><span class="d">Duplicate everything selected</span><kbd>ctrl</kbd><kbd>D</kbd></div>
 
     <div class="sc-grp">Board</div>
     <div class="sc"><span class="d">Save board to disk</span><kbd>ctrl</kbd><kbd>S</kbd></div>
@@ -142,6 +148,11 @@
      thing anyone wants to draw on or clean up. -->
 <div id="drawSurface" hidden></div>
 <div id="eraseRing" hidden></div>
+
+<!-- The selection band. Screen space, not world space: it is sized straight
+     from the pointer and never passes through the camera, so it stays a crisp
+     1px rectangle at any zoom. -->
+<div id="marquee" hidden></div>
 
 <div id="toast"></div>
 
